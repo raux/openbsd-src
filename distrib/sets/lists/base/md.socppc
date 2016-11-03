@@ -1087,6 +1087,7 @@
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pcmcia/pcmciareg.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pcmcia/pcmciavar.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pv
+./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pv/hypervicreg.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pv/hypervreg.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pv/hypervvar.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/dev/pv/if_hvnreg.ph
@@ -1566,6 +1567,7 @@
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/ofp.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/pfkeyv2.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/pfvar.ph
+./usr/libdata/perl5/site_perl/powerpc-openbsd/net/pfvar_priv.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/pipex.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/pipex_local.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/net/ppp-comp.ph
@@ -2007,6 +2009,7 @@
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/namei.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/param.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/pciio.ph
+./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/percpu.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/pipe.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/pledge.ph
 ./usr/libdata/perl5/site_perl/powerpc-openbsd/sys/poll.ph

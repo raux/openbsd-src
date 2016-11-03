@@ -1063,6 +1063,7 @@
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pcmcia/pcmciareg.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pcmcia/pcmciavar.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pv
+./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pv/hypervicreg.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pv/hypervreg.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pv/hypervvar.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/dev/pv/if_hvnreg.ph
@@ -1644,6 +1645,7 @@
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/ofp.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/pfkeyv2.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/pfvar.ph
+./usr/libdata/perl5/site_perl/mips64el-openbsd/net/pfvar_priv.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/pipex.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/pipex_local.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/net/ppp-comp.ph
@@ -1994,6 +1996,7 @@
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/namei.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/param.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/pciio.ph
+./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/percpu.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/pipe.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/pledge.ph
 ./usr/libdata/perl5/site_perl/mips64el-openbsd/sys/poll.ph

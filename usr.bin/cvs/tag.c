@@ -1,4 +1,4 @@
-/*	$OpenBSD: tag.c,v 1.83 2015/12/22 21:36:57 mmcc Exp $	*/
+/*	$OpenBSD: tag.c,v 1.85 2016/10/27 07:12:02 joris Exp $	*/
 /*
  * Copyright (c) 2006 Xavier Santolaria <xsa@openbsd.org>
  *
@@ -121,7 +121,7 @@ cvs_tag(int argc, char **argv)
 				fatal("Absolute path name is invalid: %s",
 				    argv[i]);
 		}
-        } else if (cvs_cmdop == CVS_OP_TAG && argc == 0)
+	} else if (cvs_cmdop == CVS_OP_TAG && argc == 0)
 		fatal("%s", cvs_cmd_tag.cmd_synopsis);
 
 	tag_name = argv[0];
@@ -182,7 +182,6 @@ cvs_tag(int argc, char **argv)
 		if (cvs_cmdop == CVS_OP_RTAG &&
 		    chdir(current_cvsroot->cr_dir) == -1)
 			fatal("cvs_tag: %s", strerror(errno));
-
 	}
 
 	cr.flags = flags;
@@ -285,7 +284,7 @@ cvs_tag_check_files(struct cvs_file *cf)
 			goto bad;
 		rcsnum_tostr(rev, rbuf, sizeof(rbuf));
 		fi->crevstr = xstrdup(rbuf);
-		rcsnum_free(rev);
+		free(rev);
 	} else if (runflags & T_DELETE)
 		goto bad;
 
@@ -314,8 +313,7 @@ bad:
 	free(fi->nrevstr);
 	free(fi->tag_new);
 	free(fi->tag_old);
-	if (rev != NULL)
-		rcsnum_free(rev);
+	free(rev);
 	free(fi);
 }
 
@@ -425,11 +423,11 @@ tag_add(struct cvs_file *cf)
 	trev = rcs_sym_getrev(cf->file_rcs, tag_name);
 	if (trev != NULL) {
 		if (rcsnum_cmp(srev, trev, 0) == 0) {
-			rcsnum_free(trev);
+			free(trev);
 			return (-1);
 		}
 		(void)rcsnum_tostr(trev, trevbuf, sizeof(trevbuf));
-		rcsnum_free(trev);
+		free(trev);
 
 		if (!(runflags & T_FORCE_MOVE)) {
 			cvs_printf("W %s : %s ", cf->file_path, tag_name);
@@ -460,10 +458,10 @@ tag_add(struct cvs_file *cf)
 			    "failed to set tag %s to revision %s in %s",
 			    tag_name, revbuf, cf->file_rcs->rf_path);
 		}
-		rcsnum_free(trev);
+		free(trev);
 		return (-1);
 	}
 
-	rcsnum_free(trev);
+	free(trev);
 	return (0);
 }

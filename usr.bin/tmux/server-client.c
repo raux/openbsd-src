@@ -1,4 +1,4 @@
-/* $OpenBSD: server-client.c,v 1.190 2016/10/10 21:29:23 nicm Exp $ */
+/* $OpenBSD: server-client.c,v 1.197 2016/10/19 09:22:07 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -37,6 +37,7 @@ static void	server_client_check_focus(struct window_pane *);
 static void	server_client_check_resize(struct window_pane *);
 static key_code	server_client_check_mouse(struct client *);
 static void	server_client_repeat_timer(int, short, void *);
+static void	server_client_click_timer(int, short, void *);
 static void	server_client_check_exit(struct client *);
 static void	server_client_check_redraw(struct client *);
 static void	server_client_set_title(struct client *);
@@ -97,6 +98,13 @@ server_client_get_key_table(struct client *c)
 	return (name);
 }
 
+/* Is this client using the default key table? */
+int
+server_client_is_default_key_table(struct client *c)
+{
+	return (strcmp(c->keytable->name, server_client_get_key_table(c)) == 0);
+}
+
 /* Create a new client. */
 void
 server_client_create(int fd)
@@ -118,8 +126,7 @@ server_client_create(int fd)
 	c->fd = -1;
 	c->cwd = NULL;
 
-	c->cmdq = cmdq_new(c);
-	c->cmdq->client_exit = 1;
+	TAILQ_INIT(&c->queue);
 
 	c->stdin_data = evbuffer_new();
 	c->stdout_data = evbuffer_new();
@@ -148,6 +155,7 @@ server_client_create(int fd)
 	c->keytable->references++;
 
 	evtimer_set(&c->repeat_timer, server_client_repeat_timer, c);
+	evtimer_set(&c->click_timer, server_client_click_timer, c);
 
 	TAILQ_INSERT_TAIL(&clients, c, entry);
 	log_debug("new client %p", c);
@@ -216,6 +224,7 @@ server_client_lost(struct client *c)
 	free((void *)c->cwd);
 
 	evtimer_del(&c->repeat_timer);
+	evtimer_del(&c->click_timer);
 
 	key_bindings_unref_table(c->keytable);
 
@@ -233,10 +242,6 @@ server_client_lost(struct client *c)
 
 	free(c->prompt_string);
 	free(c->prompt_buffer);
-
-	c->cmdq->flags |= CMD_Q_DEAD;
-	cmdq_free(c->cmdq);
-	c->cmdq = NULL;
 
 	environ_free(c->environ);
 
@@ -271,6 +276,9 @@ server_client_free(__unused int fd, __unused short events, void *arg)
 
 	log_debug("free client %p (%d references)", c, c->references);
 
+	if (!TAILQ_EMPTY(&c->queue))
+		fatalx("queue not empty");
+
 	if (c->references == 0)
 		free(c);
 }
@@ -284,7 +292,7 @@ server_client_detach(struct client *c, enum msgtype msgtype)
 	if (s == NULL)
 		return;
 
-	hooks_run(c->session->hooks, c, NULL, "client-detached");
+	notify_client("client-detached", c);
 	proc_send_s(c->peer, msgtype, s->name);
 }
 
@@ -292,14 +300,16 @@ server_client_detach(struct client *c, enum msgtype msgtype)
 static key_code
 server_client_check_mouse(struct client *c)
 {
-	struct session				*s = c->session;
-	struct mouse_event			*m = &c->tty.mouse;
-	struct window				*w;
-	struct window_pane			*wp;
-	enum { NOTYPE, DOWN, UP, DRAG, WHEEL }	 type = NOTYPE;
-	enum { NOWHERE, PANE, STATUS, BORDER }	 where = NOWHERE;
-	u_int					 x, y, b;
-	key_code				 key;
+	struct session		*s = c->session;
+	struct mouse_event	*m = &c->tty.mouse;
+	struct window		*w;
+	struct window_pane	*wp;
+	u_int			 x, y, b;
+	int			 flag;
+	key_code		 key;
+	struct timeval		 tv;
+	enum { NOTYPE, DOWN, UP, DRAG, WHEEL, DOUBLE, TRIPLE } type = NOTYPE;
+	enum { NOWHERE, PANE, STATUS, BORDER } where = NOWHERE;
 
 	log_debug("mouse %02x at %u,%u (last %u,%u) (%d)", m->b, m->x, m->y,
 	    m->lx, m->ly, c->tty.mouse_drag_flag);
@@ -323,10 +333,45 @@ server_client_check_mouse(struct client *c)
 		x = m->x, y = m->y, b = m->lb;
 		log_debug("up at %u,%u", x, y);
 	} else {
+		if (c->flags & CLIENT_DOUBLECLICK) {
+			evtimer_del(&c->click_timer);
+			c->flags &= ~CLIENT_DOUBLECLICK;
+			if (m->b == c->click_button) {
+				type = DOUBLE;
+				x = m->x, y = m->y, b = m->b;
+				log_debug("double-click at %u,%u", x, y);
+				flag = CLIENT_TRIPLECLICK;
+				goto add_timer;
+			}
+		} else if (c->flags & CLIENT_TRIPLECLICK) {
+			evtimer_del(&c->click_timer);
+			c->flags &= ~CLIENT_TRIPLECLICK;
+			if (m->b == c->click_button) {
+				type = TRIPLE;
+				x = m->x, y = m->y, b = m->b;
+				log_debug("triple-click at %u,%u", x, y);
+				goto have_event;
+			}
+		}
+
 		type = DOWN;
 		x = m->x, y = m->y, b = m->b;
 		log_debug("down at %u,%u", x, y);
+		flag = CLIENT_DOUBLECLICK;
+
+	add_timer:
+		if (KEYC_CLICK_TIMEOUT != 0) {
+			c->flags |= flag;
+			c->click_button = m->b;
+
+			tv.tv_sec = KEYC_CLICK_TIMEOUT / 1000;
+			tv.tv_usec = (KEYC_CLICK_TIMEOUT % 1000) * 1000L;
+			evtimer_del(&c->click_timer);
+			evtimer_add(&c->click_timer, &tv);
+		}
 	}
+
+have_event:
 	if (type == NOTYPE)
 		return (KEYC_UNKNOWN);
 
@@ -539,6 +584,62 @@ server_client_check_mouse(struct client *c)
 			break;
 		}
 		break;
+	case DOUBLE:
+		switch (MOUSE_BUTTONS(b)) {
+		case 0:
+			if (where == PANE)
+				key = KEYC_DOUBLECLICK1_PANE;
+			if (where == STATUS)
+				key = KEYC_DOUBLECLICK1_STATUS;
+			if (where == BORDER)
+				key = KEYC_DOUBLECLICK1_BORDER;
+			break;
+		case 1:
+			if (where == PANE)
+				key = KEYC_DOUBLECLICK2_PANE;
+			if (where == STATUS)
+				key = KEYC_DOUBLECLICK2_STATUS;
+			if (where == BORDER)
+				key = KEYC_DOUBLECLICK2_BORDER;
+			break;
+		case 2:
+			if (where == PANE)
+				key = KEYC_DOUBLECLICK3_PANE;
+			if (where == STATUS)
+				key = KEYC_DOUBLECLICK3_STATUS;
+			if (where == BORDER)
+				key = KEYC_DOUBLECLICK3_BORDER;
+			break;
+		}
+		break;
+	case TRIPLE:
+		switch (MOUSE_BUTTONS(b)) {
+		case 0:
+			if (where == PANE)
+				key = KEYC_TRIPLECLICK1_PANE;
+			if (where == STATUS)
+				key = KEYC_TRIPLECLICK1_STATUS;
+			if (where == BORDER)
+				key = KEYC_TRIPLECLICK1_BORDER;
+			break;
+		case 1:
+			if (where == PANE)
+				key = KEYC_TRIPLECLICK2_PANE;
+			if (where == STATUS)
+				key = KEYC_TRIPLECLICK2_STATUS;
+			if (where == BORDER)
+				key = KEYC_TRIPLECLICK2_BORDER;
+			break;
+		case 2:
+			if (where == PANE)
+				key = KEYC_TRIPLECLICK3_PANE;
+			if (where == STATUS)
+				key = KEYC_TRIPLECLICK3_STATUS;
+			if (where == BORDER)
+				key = KEYC_TRIPLECLICK3_BORDER;
+			break;
+		}
+		break;
 	}
 	if (key == KEYC_UNKNOWN)
 		return (KEYC_UNKNOWN);
@@ -587,6 +688,7 @@ server_client_handle_key(struct client *c, key_code key)
 	struct window		*w;
 	struct window_pane	*wp;
 	struct timeval		 tv;
+	const char		*name;
 	struct key_table	*table;
 	struct key_binding	 bd_find, *bd;
 	int			 xtimeout;
@@ -595,6 +697,10 @@ server_client_handle_key(struct client *c, key_code key)
 	if (s == NULL || (c->flags & (CLIENT_DEAD|CLIENT_SUSPENDED)) != 0)
 		return;
 	w = s->curw->window;
+	if (KEYC_IS_MOUSE(key))
+		wp = cmd_mouse_pane(m, NULL, NULL);
+	else
+		wp = w->active;
 
 	/* Update the activity timer. */
 	if (gettimeofday(&c->activity_time, NULL) != 0)
@@ -619,9 +725,10 @@ server_client_handle_key(struct client *c, key_code key)
 		server_clear_identify(c, NULL);
 	}
 	if (c->prompt_string != NULL) {
-		if (!(c->flags & CLIENT_READONLY))
-			status_prompt_key(c, key);
-		return;
+		if (c->flags & CLIENT_READONLY)
+			return;
+		if (status_prompt_key(c, key) == 0)
+			return;
 	}
 
 	/* Check for mouse keys. */
@@ -645,9 +752,21 @@ server_client_handle_key(struct client *c, key_code key)
 		goto forward;
 
 retry:
+	/*
+	 * Work out the current key table. If the pane is in a mode, use
+	 * the mode table instead of the default key table.
+	 */
+	name = NULL;
+	if (wp != NULL && wp->mode != NULL && wp->mode->key_table != NULL)
+		name = wp->mode->key_table(wp);
+	if (name == NULL || !server_client_is_default_key_table(c))
+		table = c->keytable;
+	else
+		table = key_bindings_get_table(name, 1);
+
 	/* Try to see if there is a key binding in the current table. */
 	bd_find.key = key;
-	bd = RB_FIND(key_bindings, &c->keytable->key_bindings, &bd_find);
+	bd = RB_FIND(key_bindings, &table->key_bindings, &bd_find);
 	if (bd != NULL) {
 		/*
 		 * Key was matched in this table. If currently repeating but a
@@ -665,7 +784,6 @@ retry:
 		 * Take a reference to this table to make sure the key binding
 		 * doesn't disappear.
 		 */
-		table = c->keytable;
 		table->references++;
 
 		/*
@@ -704,7 +822,7 @@ retry:
 	}
 
 	/* If no match and we're not in the root table, that's it. */
-	if (strcmp(c->keytable->name, server_client_get_key_table(c)) != 0) {
+	if (name == NULL && !server_client_is_default_key_table(c)) {
 		server_client_set_key_table(c, NULL);
 		server_status_client(c);
 		return;
@@ -724,10 +842,6 @@ retry:
 forward:
 	if (c->flags & CLIENT_READONLY)
 		return;
-	if (KEYC_IS_MOUSE(key))
-		wp = cmd_mouse_pane(m, NULL, NULL);
-	else
-		wp = w->active;
 	if (wp != NULL)
 		window_pane_key(wp, c, s, key, m);
 }
@@ -739,6 +853,7 @@ server_client_loop(void)
 	struct client		*c;
 	struct window		*w;
 	struct window_pane	*wp;
+	int			 focus;
 
 	TAILQ_FOREACH(c, &clients, entry) {
 		server_client_check_exit(c);
@@ -752,11 +867,13 @@ server_client_loop(void)
 	 * Any windows will have been redrawn as part of clients, so clear
 	 * their flags now. Also check pane focus and resize.
 	 */
+	focus = options_get_number(global_options, "focus-events");
 	RB_FOREACH(w, windows, &windows) {
 		w->flags &= ~WINDOW_REDRAW;
 		TAILQ_FOREACH(wp, &w->panes, entry) {
 			if (wp->fd != -1) {
-				server_client_check_focus(wp);
+				if (focus)
+					server_client_check_focus(wp);
 				server_client_check_resize(wp);
 			}
 			wp->flags &= ~PANE_REDRAW;
@@ -822,10 +939,6 @@ server_client_check_focus(struct window_pane *wp)
 {
 	struct client	*c;
 	int		 push;
-
-	/* Are focus events off? */
-	if (!options_get_number(global_options, "focus-events"))
-		return;
 
 	/* Do we need to push the focus state? */
 	push = wp->flags & PANE_FOCUSPUSH;
@@ -924,6 +1037,15 @@ server_client_repeat_timer(__unused int fd, __unused short events, void *data)
 		c->flags &= ~CLIENT_REPEAT;
 		server_status_client(c);
 	}
+}
+
+/* Double-click callback. */
+static void
+server_client_click_timer(__unused int fd, __unused short events, void *data)
+{
+	struct client	*c = data;
+
+	c->flags &= ~(CLIENT_DOUBLECLICK|CLIENT_TRIPLECLICK);
 }
 
 /* Check if client should be exited. */
@@ -1087,7 +1209,7 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 			server_redraw_client(c);
 		}
 		if (c->session != NULL)
-			hooks_run(c->session->hooks, c, NULL, "client-resized");
+			notify_client("client-resized", c);
 		break;
 	case MSG_EXITING:
 		if (datalen != 0)
@@ -1129,6 +1251,29 @@ server_client_dispatch(struct imsg *imsg, void *arg)
 	}
 }
 
+/* Callback when command is done. */
+static enum cmd_retval
+server_client_command_done(struct cmdq_item *item, __unused void *data)
+{
+	struct client	*c = item->client;
+
+	if (~c->flags & CLIENT_ATTACHED)
+		c->flags |= CLIENT_EXIT;
+	return (CMD_RETURN_NORMAL);
+}
+
+/* Show an error message. */
+static enum cmd_retval
+server_client_command_error(struct cmdq_item *item, void *data)
+{
+	char	*error = data;
+
+	cmdq_error(item, "%s", error);
+	free(error);
+
+	return (CMD_RETURN_NORMAL);
+}
+
 /* Handle command message. */
 static void
 server_client_dispatch_command(struct client *c, struct imsg *imsg)
@@ -1151,7 +1296,7 @@ server_client_dispatch_command(struct client *c, struct imsg *imsg)
 
 	argc = data.argc;
 	if (cmd_unpack_argv(buf, len, argc, &argv) != 0) {
-		cmdq_error(c->cmdq, "command too long");
+		cause = xstrdup("command too long");
 		goto error;
 	}
 
@@ -1162,20 +1307,19 @@ server_client_dispatch_command(struct client *c, struct imsg *imsg)
 	}
 
 	if ((cmdlist = cmd_list_parse(argc, argv, NULL, 0, &cause)) == NULL) {
-		cmdq_error(c->cmdq, "%s", cause);
 		cmd_free_argv(argc, argv);
 		goto error;
 	}
 	cmd_free_argv(argc, argv);
 
-	if (c != cfg_client || cfg_finished)
-		cmdq_run(c->cmdq, cmdlist, NULL);
-	else
-		cmdq_append(c->cmdq, cmdlist, NULL);
+	cmdq_append(c, cmdq_get_command(cmdlist, NULL, NULL, 0));
+	cmdq_append(c, cmdq_get_callback(server_client_command_done, NULL));
 	cmd_list_free(cmdlist);
 	return;
 
 error:
+	cmdq_append(c, cmdq_get_callback(server_client_command_error, cause));
+
 	if (cmdlist != NULL)
 		cmd_list_free(cmdlist);
 

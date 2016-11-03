@@ -1161,6 +1161,7 @@
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pcmcia/pcmciareg.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pcmcia/pcmciavar.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pv
+./usr/libdata/perl5/site_perl/arm-openbsd/dev/pv/hypervicreg.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pv/hypervreg.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pv/hypervvar.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/dev/pv/if_hvnreg.ph
@@ -1641,6 +1642,7 @@
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/ofp.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/pfkeyv2.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/pfvar.ph
+./usr/libdata/perl5/site_perl/arm-openbsd/net/pfvar_priv.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/pipex.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/pipex_local.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/net/ppp-comp.ph
@@ -1991,6 +1993,7 @@
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/namei.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/param.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/pciio.ph
+./usr/libdata/perl5/site_perl/arm-openbsd/sys/percpu.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/pipe.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/pledge.ph
 ./usr/libdata/perl5/site_perl/arm-openbsd/sys/poll.ph

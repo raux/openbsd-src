@@ -1,4 +1,4 @@
-/* $OpenBSD: paste.c,v 1.36 2016/10/10 13:54:47 nicm Exp $ */
+/* $OpenBSD: paste.c,v 1.38 2016/10/12 09:07:58 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -17,10 +17,10 @@
  */
 
 #include <sys/types.h>
-#include <sys/time.h>
 
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <vis.h>
 
 #include "tmux.h"
@@ -46,8 +46,8 @@ struct paste_buffer {
 static u_int	paste_next_index;
 static u_int	paste_next_order;
 static u_int	paste_num_automatic;
-RB_HEAD(paste_name_tree, paste_buffer) paste_by_name;
-RB_HEAD(paste_time_tree, paste_buffer) paste_by_time;
+static RB_HEAD(paste_name_tree, paste_buffer) paste_by_name;
+static RB_HEAD(paste_time_tree, paste_buffer) paste_by_time;
 
 static int	paste_cmp_names(const struct paste_buffer *,
 		    const struct paste_buffer *);

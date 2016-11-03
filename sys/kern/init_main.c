@@ -1,4 +1,4 @@
-/*	$OpenBSD: init_main.c,v 1.259 2016/09/22 12:55:24 mpi Exp $	*/
+/*	$OpenBSD: init_main.c,v 1.261 2016/10/24 04:38:44 dlg Exp $	*/
 /*	$NetBSD: init_main.c,v 1.84.4.1 1996/06/02 09:08:06 mrg Exp $	*/
 
 /*
@@ -146,6 +146,7 @@ void	kqueue_init(void);
 void	taskq_init(void);
 void	timeout_proc_init(void);
 void	pool_gc_pages(void *);
+void	percpu_init(void);
 
 extern char sigcode[], esigcode[], sigcoderet[];
 #ifdef SYSCALL_DEBUG
@@ -360,6 +361,9 @@ main(void *framep)
 	/* Configure virtual memory system, set vm rlimits. */
 	uvm_init_limits(p);
 
+	/* Per CPU memory allocation */
+	percpu_init();
+
 	/* Initialize the file systems. */
 #if defined(NFSSERVER) || defined(NFSCLIENT)
 	nfs_init();			/* initialize server/shared data */
@@ -410,6 +414,8 @@ main(void *framep)
 	/* Initialize kernel profiling. */
 	prof_init();
 #endif
+
+	mbcpuinit();	/* enable per cpu mbuf data */
 
 	/* init exec and emul */
 	init_exec();

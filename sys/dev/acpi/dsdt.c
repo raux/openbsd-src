@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.c,v 1.225 2016/09/27 10:04:19 mlarkin Exp $ */
+/* $OpenBSD: dsdt.c,v 1.227 2016/10/25 06:48:58 pirofti Exp $ */
 /*
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
  *
@@ -20,6 +20,7 @@
 #include <sys/kernel.h>
 #include <sys/device.h>
 #include <sys/malloc.h>
+#include <sys/time.h>
 
 #include <machine/bus.h>
 
@@ -247,6 +248,7 @@ struct aml_opcode aml_table[] = {
 	{ AMLOP_LOADTABLE,	"LoadTable",	"tttttt" },
 	{ AMLOP_STALL,		"Stall",	"i",	},
 	{ AMLOP_SLEEP,		"Sleep",	"i",	},
+	{ AMLOP_TIMER,		"Timer",	"",	},
 	{ AMLOP_LOAD,		"Load",		"nS",	},
 	{ AMLOP_UNLOAD,		"Unload",	"t" },
 	{ AMLOP_STORE,		"Store",	"tS",	},
@@ -1621,14 +1623,14 @@ aml_mapresource(union acpi_resource *crs)
 
 int
 aml_parse_resource(struct aml_value *res,
-    int (*crs_enum)(union acpi_resource *, void *), void *arg)
+    int (*crs_enum)(int, union acpi_resource *, void *), void *arg)
 {
-	int off, rlen;
+	int off, rlen, crsidx;
 	union acpi_resource *crs;
 
 	if (res->type != AML_OBJTYPE_BUFFER || res->length < 5)
 		return (-1);
-	for (off = 0; off < res->length; off += rlen) {
+	for (off = 0, crsidx = 0; off < res->length; off += rlen, crsidx++) {
 		crs = (union acpi_resource *)(res->v_buffer+off);
 
 		rlen = AML_CRSLEN(crs);
@@ -1639,7 +1641,7 @@ aml_parse_resource(struct aml_value *res,
 #ifdef ACPI_DEBUG
 		aml_print_resource(crs, NULL);
 #endif
-		crs_enum(crs, arg);
+		crs_enum(crsidx, crs, arg);
 	}
 
 	return (0);
@@ -1746,7 +1748,7 @@ int		aml_compare(struct aml_value *, struct aml_value *, int);
 struct aml_value *aml_concat(struct aml_value *, struct aml_value *);
 struct aml_value *aml_concatres(struct aml_value *, struct aml_value *);
 struct aml_value *aml_mid(struct aml_value *, int, int);
-int		aml_ccrlen(union acpi_resource *, void *);
+int		aml_ccrlen(int, union acpi_resource *, void *);
 
 void		aml_store(struct aml_scope *, struct aml_value *, int64_t,
     struct aml_value *);
@@ -2140,7 +2142,7 @@ aml_concat(struct aml_value *a1, struct aml_value *a2)
 
 /* Calculate length of Resource Template */
 int
-aml_ccrlen(union acpi_resource *rs, void *arg)
+aml_ccrlen(int crsidx, union acpi_resource *rs, void *arg)
 {
 	int *plen = arg;
 
@@ -3437,6 +3439,7 @@ aml_parse(struct aml_scope *scope, int ret_type, const char *stype)
 	uint8_t *start, *end;
 	const char *ch;
 	int64_t ival;
+	struct timespec ts;
 
 	my_ret = NULL;
 	if (scope == NULL || scope->pos >= scope->end) {
@@ -4037,7 +4040,8 @@ aml_parse(struct aml_scope *scope, int ret_type, const char *stype)
 		break;
 	case AMLOP_TIMER:
 		/* Timer: => i */
-		ival = 0xDEADBEEF;
+		nanouptime(&ts);
+		ival = ts.tv_sec * 10000000 + ts.tv_nsec / 100;
 		break;
 	case AMLOP_FATAL:
 		/* Fatal: bdi */

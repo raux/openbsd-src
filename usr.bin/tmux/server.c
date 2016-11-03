@@ -1,4 +1,4 @@
-/* $OpenBSD: server.c,v 1.160 2016/10/10 21:29:23 nicm Exp $ */
+/* $OpenBSD: server.c,v 1.163 2016/10/16 19:15:02 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -190,6 +190,13 @@ static int
 server_loop(void)
 {
 	struct client	*c;
+	u_int		 items;
+
+	do {
+		items = cmdq_next(NULL);
+		TAILQ_FOREACH(c, &clients, entry)
+		    items += cmdq_next(c);
+	} while (items != 0);
 
 	server_client_loop();
 

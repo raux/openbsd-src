@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap7.c,v 1.53 2016/09/24 13:03:47 kettenis Exp $	*/
+/*	$OpenBSD: pmap7.c,v 1.55 2016/10/22 17:48:41 patrick Exp $	*/
 /*	$NetBSD: pmap.c,v 1.147 2004/01/18 13:03:50 scw Exp $	*/
 
 /*
@@ -1697,6 +1697,9 @@ dab_access(trapframe_t *tf, u_int fsr, u_int far, struct proc *p)
 	paddr_t pa;
 	u_int l1idx;
 
+	if (!TRAP_USERMODE(tf) && far >= VM_MIN_KERNEL_ADDRESS)
+		pm = pmap_kernel();
+
 	l1idx = L1_IDX(va);
 
 	/*
@@ -1766,10 +1769,10 @@ pmap_collect(pmap_t pm)
  *
  */
 void
-pmap_proc_iflush(struct proc *p, vaddr_t va, vsize_t len)
+pmap_proc_iflush(struct process *pr, vaddr_t va, vsize_t len)
 {
 	/* We only need to do anything if it is the current process. */
-	if (p == curproc)
+	if (pr == curproc->p_p)
 		cpu_icache_sync_range(va, len);
 }
 

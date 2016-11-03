@@ -1,4 +1,4 @@
-/*	$OpenBSD: mbuf.h,v 1.220 2016/09/17 00:38:43 deraadt Exp $	*/
+/*	$OpenBSD: mbuf.h,v 1.222 2016/10/24 04:38:44 dlg Exp $	*/
 /*	$NetBSD: mbuf.h,v 1.19 1996/02/09 18:25:14 christos Exp $	*/
 
 /*
@@ -185,8 +185,8 @@ struct mbuf {
 #define M_VLANTAG	0x0020	/* ether_vtag is valid */
 #define M_LOOP		0x0040	/* for Mbuf statistics */
 #define M_ACAST		0x0080	/* received as IPv6 anycast */
-#define M_BCAST		0x0100	/* send/received as link-level broadcast */
-#define M_MCAST		0x0200	/* send/received as link-level multicast */
+#define M_BCAST		0x0100	/* sent/received as link-level broadcast */
+#define M_MCAST		0x0200	/* sent/received as link-level multicast */
 #define M_CONF		0x0400  /* payload was encrypted (ESP-transport) */
 #define M_AUTH		0x0800  /* payload was authenticated (AH or ESP auth) */
 #define M_TUNNEL	0x1000  /* IP-in-IP added by tunnel mode IPsec */
@@ -236,6 +236,7 @@ struct mbuf {
 #define	MT_FTABLE	5	/* fragment reassembly header */
 #define	MT_CONTROL	6	/* extra-data protocol message */
 #define	MT_OOBDATA	7	/* expedited data  */
+#define	MT_NTYPES	8
 
 /* flowid field */
 #define M_FLOWID_VALID	0x8000	/* is the flowid set */
@@ -393,6 +394,12 @@ struct mbstat {
 	u_short	m_mtypes[256];	/* type specific mbuf allocations */
 };
 
+#define MBSTAT_TYPES           MT_NTYPES
+#define MBSTAT_DROPS           (MBSTAT_TYPES + 0)
+#define MBSTAT_WAIT            (MBSTAT_TYPES + 1)
+#define MBSTAT_DRAIN           (MBSTAT_TYPES + 2)
+#define MBSTAT_COUNT           (MBSTAT_TYPES + 3)
+
 #include <sys/mutex.h>
 
 struct mbuf_list {
@@ -410,7 +417,6 @@ struct mbuf_queue {
 
 #ifdef	_KERNEL
 
-extern	struct mbstat mbstat;
 extern	int nmbclust;			/* limit on the # of clusters */
 extern	int mblowat;			/* mbuf low water mark */
 extern	int mcllowat;			/* mbuf cluster low water mark */
@@ -419,6 +425,7 @@ extern	int max_protohdr;		/* largest protocol header */
 extern	int max_hdr;			/* largest link+protocol header */
 
 void	mbinit(void);
+void	mbcpuinit(void);
 struct	mbuf *m_copym(struct mbuf *, int, int, int);
 struct	mbuf *m_free(struct mbuf *);
 struct	mbuf *m_get(int, int);

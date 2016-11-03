@@ -1,4 +1,4 @@
-/*	$OpenBSD: syslogd.h,v 1.24 2016/10/06 13:03:47 bluhm Exp $ */
+/*	$OpenBSD: syslogd.h,v 1.26 2016/10/17 11:19:55 bluhm Exp $ */
 
 /*
  * Copyright (c) 2003 Anil Madhavapeddy <anil@recoil.org>
@@ -42,12 +42,9 @@ void send_fd(int, int);
 int  receive_fd(int);
 
 /* The list of domain sockets */
-#define MAXUNIX	21
 extern int nunix;
-extern char *path_unix[MAXUNIX];
+extern char **path_unix;
 extern char *path_ctlsock;
-extern int fd_ctlsock, fd_ctlconn, fd_klog, fd_sendsys;
-extern int fd_udp, fd_udp6, fd_bind, fd_listen, fd_tls, fd_unix[MAXUNIX];
 
 #define MAXLINE		8192		/* maximum line length */
 #define ERRBUFSIZE	256

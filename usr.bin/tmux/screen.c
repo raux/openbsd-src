@@ -1,4 +1,4 @@
-/* $OpenBSD: screen.c,v 1.41 2016/10/10 21:29:23 nicm Exp $ */
+/* $OpenBSD: screen.c,v 1.44 2016/10/13 20:27:27 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -26,6 +26,8 @@
 
 static void	screen_resize_x(struct screen *, u_int);
 static void	screen_resize_y(struct screen *, u_int);
+
+static void	screen_reflow(struct screen *, u_int);
 
 /* Create a new screen. */
 void
@@ -58,7 +60,7 @@ screen_reinit(struct screen *s)
 
 	screen_reset_tabs(s);
 
-	grid_clear_lines(s->grid, s->grid->hsize, s->grid->sy);
+	grid_clear_lines(s->grid, s->grid->hsize, s->grid->sy, 8);
 
 	screen_clear_selection(s);
 }
@@ -191,7 +193,8 @@ screen_resize_y(struct screen *s, u_int sy)
 		if (available > 0) {
 			if (available > needed)
 				available = needed;
-			grid_view_delete_lines(gd, oldy - available, available);
+			grid_view_delete_lines(gd, oldy - available, available,
+			    8);
 		}
 		needed -= available;
 
@@ -207,7 +210,7 @@ screen_resize_y(struct screen *s, u_int sy)
 		} else if (needed > 0 && available > 0) {
 			if (available > needed)
 				available = needed;
-			grid_view_delete_lines(gd, 0, available);
+			grid_view_delete_lines(gd, 0, available, 8);
 		}
 		s->cy -= needed;
 	}
@@ -369,8 +372,24 @@ screen_check_selection(struct screen *s, u_int px, u_int py)
 	return (1);
 }
 
-/* Reflow wrapped lines. */
+/* Get selected grid cell. */
 void
+screen_select_cell(struct screen *s, struct grid_cell *dst,
+    const struct grid_cell *src)
+{
+	if (!s->sel.flag)
+		return;
+
+	memcpy(dst, &s->sel.cell, sizeof *dst);
+
+	utf8_copy(&dst->data, &src->data);
+	dst->attr = dst->attr & ~GRID_ATTR_CHARSET;
+	dst->attr |= src->attr & GRID_ATTR_CHARSET;
+	dst->flags = src->flags;
+}
+
+/* Reflow wrapped lines. */
+static void
 screen_reflow(struct screen *s, u_int new_x)
 {
 	struct grid	*old = s->grid;

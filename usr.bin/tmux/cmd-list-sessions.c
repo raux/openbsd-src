@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-list-sessions.c,v 1.25 2016/10/10 21:51:39 nicm Exp $ */
+/* $OpenBSD: cmd-list-sessions.c,v 1.27 2016/10/16 19:04:05 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -36,7 +36,8 @@
 	"#{session_group}#{?session_grouped,),}"	\
 	"#{?session_attached, (attached),}"
 
-static enum cmd_retval	 cmd_list_sessions_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_list_sessions_exec(struct cmd *,
+			    struct cmdq_item *);
 
 const struct cmd_entry cmd_list_sessions_entry = {
 	.name = "list-sessions",
@@ -45,12 +46,12 @@ const struct cmd_entry cmd_list_sessions_entry = {
 	.args = { "F:", 0, 0 },
 	.usage = "[-F format]",
 
-	.flags = 0,
+	.flags = CMD_AFTERHOOK,
 	.exec = cmd_list_sessions_exec
 };
 
 static enum cmd_retval
-cmd_list_sessions_exec(struct cmd *self, struct cmd_q *cmdq)
+cmd_list_sessions_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = self->args;
 	struct session		*s;
@@ -64,12 +65,12 @@ cmd_list_sessions_exec(struct cmd *self, struct cmd_q *cmdq)
 
 	n = 0;
 	RB_FOREACH(s, sessions, &sessions) {
-		ft = format_create(cmdq, 0);
+		ft = format_create(item, 0);
 		format_add(ft, "line", "%u", n);
 		format_defaults(ft, NULL, s, NULL, NULL);
 
 		line = format_expand(ft, template);
-		cmdq_print(cmdq, "%s", line);
+		cmdq_print(item, "%s", line);
 		free(line);
 
 		format_free(ft);

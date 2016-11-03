@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.60 2016/08/16 13:03:58 visa Exp $ */
+/*	$OpenBSD: cpu.c,v 1.62 2016/10/27 13:19:27 visa Exp $ */
 
 /*
  * Copyright (c) 1997-2004 Opsycon AB (www.opsycon.se)

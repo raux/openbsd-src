@@ -1,4 +1,4 @@
-/*	$OpenBSD: mpii.c,v 1.105 2016/09/14 01:14:54 jmatthew Exp $	*/
+/*	$OpenBSD: mpii.c,v 1.107 2016/10/24 01:50:09 dlg Exp $	*/
 /*
  * Copyright (c) 2010, 2012 Mike Belopuhov
  * Copyright (c) 2009 James Giannoules
@@ -164,6 +164,7 @@ struct mpii_softc {
 	int			sc_flags;
 #define MPII_F_RAID		(1<<1)
 #define MPII_F_SAS3		(1<<2)
+#define MPII_F_CONFIG_PENDING	(1<<3)
 
 	struct scsibus_softc	*sc_scsibus;
 
@@ -343,6 +344,8 @@ void		mpii_event_process(struct mpii_softc *, struct mpii_rcb *);
 void		mpii_event_done(struct mpii_softc *, struct mpii_rcb *);
 void		mpii_event_sas(void *);
 void		mpii_event_raid(struct mpii_softc *,
+		    struct mpii_msg_event_reply *);
+void		mpii_event_discovery(struct mpii_softc *,
 		    struct mpii_msg_event_reply *);
 
 void		mpii_sas_remove_device(struct mpii_softc *, u_int16_t);
@@ -589,6 +592,10 @@ mpii_attach(struct device *parent, struct device *self, void *aux)
 	    mpii_intr, sc, sc->sc_dev.dv_xname);
 	if (sc->sc_ih == NULL)
 		goto free_devs;
+
+	/* force autoconf to wait for the first sas discovery to complete */
+	SET(sc->sc_flags, MPII_F_CONFIG_PENDING);
+	config_pending_incr();
 
 	/* config_found() returns the scsibus attached to us */
 	sc->sc_scsibus = (struct scsibus_softc *) config_found(&sc->sc_dev,
@@ -862,19 +869,49 @@ mpii_load_xs(struct mpii_ccb *ccb)
 int
 mpii_scsi_probe(struct scsi_link *link)
 {
-	struct mpii_softc	*sc = link->adapter_softc;
-	int			flags;
+	struct mpii_softc *sc = link->adapter_softc;
+	struct mpii_cfg_sas_dev_pg0 pg0;
+	struct mpii_ecfg_hdr ehdr;
+	struct mpii_device *dev;
+	uint32_t address;
+	int flags;
 
 	if ((sc->sc_porttype != MPII_PORTFACTS_PORTTYPE_SAS_PHYSICAL) &&
 	    (sc->sc_porttype != MPII_PORTFACTS_PORTTYPE_SAS_VIRTUAL))
 		return (ENXIO);
 
-	if (sc->sc_devs[link->target] == NULL)
+	dev = sc->sc_devs[link->target];
+	if (dev == NULL)
 		return (1);
 
-	flags = sc->sc_devs[link->target]->flags;
+	flags = dev->flags;
 	if (ISSET(flags, MPII_DF_HIDDEN) || ISSET(flags, MPII_DF_UNUSED))
 		return (1);
+
+	memset(&ehdr, 0, sizeof(ehdr));	
+	ehdr.page_type = MPII_CONFIG_REQ_PAGE_TYPE_EXTENDED;
+	ehdr.page_number = 0;
+	ehdr.page_version = 0;
+	ehdr.ext_page_type = MPII_CONFIG_REQ_EXTPAGE_TYPE_SAS_DEVICE;
+	ehdr.ext_page_length = htole16(sizeof(pg0) / 4); /* dwords */
+
+	address = MPII_PGAD_SAS_DEVICE_FORM_HANDLE | (uint32_t)dev->dev_handle;
+	if (mpii_req_cfg_page(sc, address, MPII_PG_EXTENDED,
+	    &ehdr, 1, &pg0, sizeof(pg0)) != 0) {
+		printf("%s: unable to fetch SAS device page 0 for target %u\n",
+		    DEVNAME(sc), link->target);
+
+		return (0); /* the handle should still work */
+	}
+
+	link->port_wwn = letoh64(pg0.sas_addr);
+	link->node_wwn = letoh64(pg0.device_name);
+
+	if (ISSET(lemtoh32(&pg0.device_info),
+	    MPII_CFG_SAS_DEV_0_DEVINFO_ATAPI_DEVICE)) {
+		link->flags |= SDEV_ATAPI;
+		link->quirks |= SDEV_ONLYBIG;
+	}
 
 	return (0);
 }
@@ -1795,6 +1832,19 @@ mpii_event_sas(void *xsc)
 		task_add(systq, &sc->sc_evt_sas_task);
 
 	enp = (struct mpii_msg_event_reply *)rcb->rcb_reply;
+	switch (lemtoh16(&enp->event)) {
+	case MPII_EVENT_SAS_DISCOVERY:
+		mpii_event_discovery(sc, enp);
+		goto done;
+	case MPII_EVENT_SAS_TOPOLOGY_CHANGE_LIST:
+		/* handle below */
+		break;
+	default:
+		panic("%s: unexpected event %#x in sas event queue",
+		    DEVNAME(sc), lemtoh16(&enp->event));
+		/* NOTREACHED */
+	}
+
 	tcl = (struct mpii_evt_sas_tcl *)(enp + 1);
 	pe = (struct mpii_evt_phy_entry *)(tcl + 1);
 
@@ -1846,7 +1896,27 @@ mpii_event_sas(void *xsc)
 		}
 	}
 
+done:
 	mpii_event_done(sc, rcb);
+}
+
+void
+mpii_event_discovery(struct mpii_softc *sc, struct mpii_msg_event_reply *enp)
+{
+	struct mpii_evt_sas_discovery *esd =
+	    (struct mpii_evt_sas_discovery *)(enp + 1);
+
+	if (esd->reason_code == MPII_EVENT_SAS_DISC_REASON_CODE_COMPLETED) {
+		if (esd->discovery_status != 0) {
+			printf("%s: sas discovery completed with status %#x\n",
+			    DEVNAME(sc), esd->discovery_status);
+		}
+
+		if (ISSET(sc->sc_flags, MPII_F_CONFIG_PENDING)) {
+			CLR(sc->sc_flags, MPII_F_CONFIG_PENDING);
+			config_pending_decr();
+		}
+	}
 }
 
 void
@@ -1863,17 +1933,7 @@ mpii_event_process(struct mpii_softc *sc, struct mpii_rcb *rcb)
 	case MPII_EVENT_EVENT_CHANGE:
 		/* should be properly ignored */
 		break;
-	case MPII_EVENT_SAS_DISCOVERY: {
-		struct mpii_evt_sas_discovery	*esd =
-		    (struct mpii_evt_sas_discovery *)(enp + 1);
-
-		if (esd->reason_code ==
-		    MPII_EVENT_SAS_DISC_REASON_CODE_COMPLETED &&
-		    esd->discovery_status != 0)
-			printf("%s: sas discovery completed with status %#x\n",
-			    DEVNAME(sc), esd->discovery_status);
-		}
-		break;
+	case MPII_EVENT_SAS_DISCOVERY:
 	case MPII_EVENT_SAS_TOPOLOGY_CHANGE_LIST:
 		mtx_enter(&sc->sc_evt_sas_mtx);
 		SIMPLEQ_INSERT_TAIL(&sc->sc_evt_sas_queue, rcb, rcb_link);

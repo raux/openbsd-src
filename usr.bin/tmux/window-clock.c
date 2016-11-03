@@ -1,4 +1,4 @@
-/* $OpenBSD: window-clock.c,v 1.19 2016/10/10 21:51:39 nicm Exp $ */
+/* $OpenBSD: window-clock.c,v 1.21 2016/10/13 20:27:27 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -34,10 +34,10 @@ static void	window_clock_timer_callback(int, short, void *);
 static void	window_clock_draw_screen(struct window_pane *);
 
 const struct window_mode window_clock_mode = {
-	window_clock_init,
-	window_clock_free,
-	window_clock_resize,
-	window_clock_key,
+	.init = window_clock_init,
+	.free = window_clock_free,
+	.resize = window_clock_resize,
+	.key = window_clock_key,
 };
 
 struct window_clock_mode_data {
@@ -221,7 +221,7 @@ window_clock_draw_screen(struct window_pane *wp)
 	} else
 		strftime(tim, sizeof tim, "%H:%M", tm);
 
-	screen_write_clearscreen(&ctx);
+	screen_write_clearscreen(&ctx, 8);
 
 	if (screen_size_x(s) < 6 * strlen(tim) || screen_size_y(s) < 6) {
 		if (screen_size_x(s) >= strlen(tim) && screen_size_y(s) != 0) {

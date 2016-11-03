@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-send-keys.c,v 1.29 2016/10/10 21:51:39 nicm Exp $ */
+/* $OpenBSD: cmd-send-keys.c,v 1.33 2016/10/16 19:04:05 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -27,18 +27,18 @@
  * Send keys to client.
  */
 
-static enum cmd_retval	 cmd_send_keys_exec(struct cmd *, struct cmd_q *);
+static enum cmd_retval	cmd_send_keys_exec(struct cmd *, struct cmdq_item *);
 
 const struct cmd_entry cmd_send_keys_entry = {
 	.name = "send-keys",
 	.alias = "send",
 
-	.args = { "lRMt:", 0, -1 },
-	.usage = "[-lRM] " CMD_TARGET_PANE_USAGE " key ...",
+	.args = { "lXRMN:t:", 0, -1 },
+	.usage = "[-lXRM] [-N repeat-count] " CMD_TARGET_PANE_USAGE " key ...",
 
 	.tflag = CMD_PANE,
 
-	.flags = 0,
+	.flags = CMD_AFTERHOOK,
 	.exec = cmd_send_keys_exec
 };
 
@@ -51,25 +51,57 @@ const struct cmd_entry cmd_send_prefix_entry = {
 
 	.tflag = CMD_PANE,
 
-	.flags = 0,
+	.flags = CMD_AFTERHOOK,
 	.exec = cmd_send_keys_exec
 };
 
 static enum cmd_retval
-cmd_send_keys_exec(struct cmd *self, struct cmd_q *cmdq)
+cmd_send_keys_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = self->args;
-	struct window_pane	*wp = cmdq->state.tflag.wp;
-	struct session		*s = cmdq->state.tflag.s;
-	struct mouse_event	*m = &cmdq->item->mouse;
+	struct client		*c = item->state.c;
+	struct window_pane	*wp = item->state.tflag.wp;
+	struct session		*s = item->state.tflag.s;
+	struct mouse_event	*m = &item->mouse;
 	const u_char		*keystr;
 	int			 i, literal;
 	key_code		 key;
+	u_int			 np;
+	char			*cause = NULL;
+
+	if (args_has(args, 'N')) {
+		if (wp->mode == NULL || wp->mode->command == NULL) {
+			cmdq_error(item, "not in a mode");
+			return (CMD_RETURN_ERROR);
+		}
+		np = args_strtonum(args, 'N', 1, UINT_MAX, &cause);
+		if (cause != NULL) {
+			cmdq_error(item, "prefix %s", cause);
+			free(cause);
+			return (CMD_RETURN_ERROR);
+		}
+		wp->modeprefix = np;
+	}
+
+	if (args_has(args, 'X')) {
+		if (wp->mode == NULL || wp->mode->command == NULL) {
+			cmdq_error(item, "not in a mode");
+			return (CMD_RETURN_ERROR);
+		}
+		if (!m->valid)
+			wp->mode->command(wp, c, s, args, NULL);
+		else
+			wp->mode->command(wp, c, s, args, m);
+		return (CMD_RETURN_NORMAL);
+	}
+
+	if (args_has(args, 'N')) /* only with -X */
+		return (CMD_RETURN_NORMAL);
 
 	if (args_has(args, 'M')) {
 		wp = cmd_mouse_pane(m, &s, NULL);
 		if (wp == NULL) {
-			cmdq_error(cmdq, "no mouse target");
+			cmdq_error(item, "no mouse target");
 			return (CMD_RETURN_ERROR);
 		}
 		window_pane_key(wp, NULL, s, m->key, m);

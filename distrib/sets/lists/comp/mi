@@ -636,12 +636,13 @@
 ./usr/include/dev/pcmcia/pcmciareg.h
 ./usr/include/dev/pcmcia/pcmciavar.h
 ./usr/include/dev/pv
+./usr/include/dev/pv/hypervicreg.h
 ./usr/include/dev/pv/hypervreg.h
 ./usr/include/dev/pv/hypervvar.h
 ./usr/include/dev/pv/if_hvnreg.h
+./usr/include/dev/pv/ndis.h
 ./usr/include/dev/pv/pvreg.h
 ./usr/include/dev/pv/pvvar.h
-./usr/include/dev/pv/ndis.h
 ./usr/include/dev/pv/xenreg.h
 ./usr/include/dev/pv/xenvar.h
 ./usr/include/dev/radio_if.h
@@ -975,6 +976,7 @@
 ./usr/include/net/ofp.h
 ./usr/include/net/pfkeyv2.h
 ./usr/include/net/pfvar.h
+./usr/include/net/pfvar_priv.h
 ./usr/include/net/pipex.h
 ./usr/include/net/pipex_local.h
 ./usr/include/net/ppp-comp.h
@@ -1338,6 +1340,7 @@
 ./usr/include/sys/namei.h
 ./usr/include/sys/param.h
 ./usr/include/sys/pciio.h
+./usr/include/sys/percpu.h
 ./usr/include/sys/pipe.h
 ./usr/include/sys/pledge.h
 ./usr/include/sys/poll.h
@@ -2661,6 +2664,8 @@
 ./usr/share/man/man9/config_attach.9
 ./usr/share/man/man9/config_defer.9
 ./usr/share/man/man9/copy.9
+./usr/share/man/man9/counters_alloc.9
+./usr/share/man/man9/cpumem_get.9
 ./usr/share/man/man9/crypto.9
 ./usr/share/man/man9/delay.9
 ./usr/share/man/man9/disk.9

@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd.c,v 1.123 2016/10/05 12:32:13 nicm Exp $ */
+/* $OpenBSD: cmd.c,v 1.128 2016/11/02 13:35:36 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -390,12 +390,11 @@ usage:
 
 static int
 cmd_prepare_state_flag(char c, const char *target, enum cmd_entry_flag flag,
-    struct cmd_q *cmdq, struct cmd_q *parent)
+    struct cmdq_item *item)
 {
 	int			 targetflags, error;
 	struct cmd_find_state	*fs = NULL;
-	struct cmd_find_state	*current = NULL;
-	struct cmd_find_state	 tmp;
+	struct cmd_find_state	 current;
 
 	if (flag == CMD_NONE ||
 	    flag == CMD_CLIENT ||
@@ -403,9 +402,9 @@ cmd_prepare_state_flag(char c, const char *target, enum cmd_entry_flag flag,
 		return (0);
 
 	if (c == 't')
-		fs = &cmdq->state.tflag;
+		fs = &item->state.tflag;
 	else if (c == 's')
-		fs = &cmdq->state.sflag;
+		fs = &item->state.sflag;
 
 	if (flag == CMD_SESSION_WITHPANE) {
 		if (target != NULL && target[strcspn(target, ":.")] != '\0')
@@ -449,19 +448,16 @@ cmd_prepare_state_flag(char c, const char *target, enum cmd_entry_flag flag,
 	default:
 		fatalx("unknown %cflag %d", c, flag);
 	}
-
 	log_debug("%s: flag %c %d %#x", __func__, c, flag, targetflags);
-	if (parent != NULL) {
-		if (c == 't')
-			current = &parent->state.tflag;
-		else if (c == 's')
-			current = &parent->state.sflag;
-	} else {
-		error = cmd_find_current(&tmp, cmdq, targetflags);
-		if (error != 0 && ~targetflags & CMD_FIND_QUIET)
+
+	error = cmd_find_current(&current, item, targetflags);
+	if (error != 0) {
+		if (~targetflags & CMD_FIND_QUIET)
 			return (-1);
-		current = &tmp;
+		cmd_find_clear_state(&current, NULL, 0);
 	}
+	if (!cmd_find_empty_state(&current) && !cmd_find_valid_state(&current))
+		fatalx("invalid current state");
 
 	switch (flag) {
 	case CMD_NONE:
@@ -472,13 +468,13 @@ cmd_prepare_state_flag(char c, const char *target, enum cmd_entry_flag flag,
 	case CMD_SESSION_CANFAIL:
 	case CMD_SESSION_PREFERUNATTACHED:
 	case CMD_SESSION_WITHPANE:
-		error = cmd_find_target(fs, current, cmdq, target,
+		error = cmd_find_target(fs, &current, item, target,
 		    CMD_FIND_SESSION, targetflags);
-		if (error != 0 && ~targetflags & CMD_FIND_QUIET)
-			return (-1);
+		if (error != 0)
+			goto error;
 		break;
 	case CMD_MOVEW_R:
-		error = cmd_find_target(fs, current, cmdq, target,
+		error = cmd_find_target(fs, &current, item, target,
 		    CMD_FIND_SESSION, CMD_FIND_QUIET);
 		if (error == 0)
 			break;
@@ -487,37 +483,43 @@ cmd_prepare_state_flag(char c, const char *target, enum cmd_entry_flag flag,
 	case CMD_WINDOW_CANFAIL:
 	case CMD_WINDOW_MARKED:
 	case CMD_WINDOW_INDEX:
-		error = cmd_find_target(fs, current, cmdq, target,
+		error = cmd_find_target(fs, &current, item, target,
 		    CMD_FIND_WINDOW, targetflags);
-		if (error != 0 && ~targetflags & CMD_FIND_QUIET)
-			return (-1);
+		if (error != 0)
+			goto error;
 		break;
 	case CMD_PANE:
 	case CMD_PANE_CANFAIL:
 	case CMD_PANE_MARKED:
-		error = cmd_find_target(fs, current, cmdq, target,
+		error = cmd_find_target(fs, &current, item, target,
 		    CMD_FIND_PANE, targetflags);
-		if (error != 0 && ~targetflags & CMD_FIND_QUIET)
-			return (-1);
+		if (error != 0)
+			goto error;
 		break;
 	default:
 		fatalx("unknown %cflag %d", c, flag);
 	}
 	return (0);
+
+error:
+	if (~targetflags & CMD_FIND_QUIET)
+		return (-1);
+	cmd_find_clear_state(fs, NULL, 0);
+	return (0);
 }
 
 int
-cmd_prepare_state(struct cmd *cmd, struct cmd_q *cmdq, struct cmd_q *parent)
+cmd_prepare_state(struct cmd *cmd, struct cmdq_item *item)
 {
-	const struct cmd_entry		*entry = cmd->entry;
-	struct cmd_state		*state = &cmdq->state;
-	char				*tmp;
-	enum cmd_entry_flag		 flag;
-	const char			*s;
-	int				 error;
+	const struct cmd_entry	*entry = cmd->entry;
+	struct cmd_state	*state = &item->state;
+	char			*tmp;
+	enum cmd_entry_flag	 flag;
+	const char		*s;
+	int			 error;
 
 	tmp = cmd_print(cmd);
-	log_debug("preparing state for %s (client %p)", tmp, cmdq->client);
+	log_debug("preparing state for %s (client %p)", tmp, item->client);
 	free(tmp);
 
 	state->c = NULL;
@@ -535,28 +537,36 @@ cmd_prepare_state(struct cmd *cmd, struct cmd_q *cmdq, struct cmd_q *parent)
 		s = args_get(cmd->args, 'c');
 	switch (flag) {
 	case CMD_CLIENT:
-		state->c = cmd_find_client(cmdq, s, 0);
+		state->c = cmd_find_client(item, s, 0);
 		if (state->c == NULL)
 			return (-1);
 		break;
 	default:
-		state->c = cmd_find_client(cmdq, s, 1);
+		state->c = cmd_find_client(item, s, 1);
 		break;
 	}
+	log_debug("using client %p", state->c);
 
 	s = args_get(cmd->args, 't');
 	log_debug("preparing -t state: target %s", s == NULL ? "none" : s);
 
-	error = cmd_prepare_state_flag('t', s, entry->tflag, cmdq, parent);
+	error = cmd_prepare_state_flag('t', s, entry->tflag, item);
 	if (error != 0)
 		return (error);
 
 	s = args_get(cmd->args, 's');
 	log_debug("preparing -s state: target %s", s == NULL ? "none" : s);
 
-	error = cmd_prepare_state_flag('s', s, entry->sflag, cmdq, parent);
+	error = cmd_prepare_state_flag('s', s, entry->sflag, item);
 	if (error != 0)
 		return (error);
+
+	if (!cmd_find_empty_state(&state->tflag) &&
+	    !cmd_find_valid_state(&state->tflag))
+		fatalx("invalid -t state");
+	if (!cmd_find_empty_state(&state->sflag) &&
+	    !cmd_find_valid_state(&state->sflag))
+		fatalx("invalid -s state");
 
 	return (0);
 }
@@ -652,8 +662,8 @@ char *
 cmd_template_replace(const char *template, const char *s, int idx)
 {
 	char		 ch, *buf;
-	const char	*ptr;
-	int		 replaced;
+	const char	*ptr, *cp;
+	int		 replaced, quoted;
 	size_t		 len;
 
 	if (strchr(template, '%') == NULL)
@@ -675,9 +685,17 @@ cmd_template_replace(const char *template, const char *s, int idx)
 			}
 			ptr++;
 
-			len += strlen(s);
-			buf = xrealloc(buf, len + 1);
-			strlcat(buf, s, len + 1);
+			quoted = (*ptr == '%');
+			if (quoted)
+				ptr++;
+
+			buf = xrealloc(buf, len + (strlen(s) * 2) + 1);
+			for (cp = s; *cp != '\0'; cp++) {
+				if (quoted && *cp == '"')
+					buf[len++] = '\\';
+				buf[len++] = *cp;
+			}
+			buf[len] = '\0';
 			continue;
 		}
 		buf = xrealloc(buf, len + 2);

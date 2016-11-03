@@ -1,7 +1,9 @@
-/*	$OpenBSD: rde.c,v 1.350 2016/09/03 16:22:17 renato Exp $ */
+/*	$OpenBSD: rde.c,v 1.352 2016/10/18 19:47:52 benno Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
+ * Copyright (c) 2016 Job Snijders <job@instituut.net>
+ * Copyright (c) 2016 Peter Hessler <phessler@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -559,6 +561,7 @@ badnet:
 		case IMSG_CTL_SHOW_RIB:
 		case IMSG_CTL_SHOW_RIB_AS:
 		case IMSG_CTL_SHOW_RIB_COMMUNITY:
+		case IMSG_CTL_SHOW_RIB_LARGECOMMUNITY:
 		case IMSG_CTL_SHOW_RIB_PREFIX:
 			if (imsg.hdr.len != IMSG_HEADER_SIZE + sizeof(req)) {
 				log_warnx("rde_dispatch: wrong imsg len");
@@ -1129,7 +1132,7 @@ rde_update_dispatch(struct imsg *imsg)
 
 		/* max prefix checker */
 		if (peer->conf.max_prefix &&
-		    peer->prefix_cnt >= peer->conf.max_prefix) {
+		    peer->prefix_cnt > peer->conf.max_prefix) {
 			log_peer_warnx(&peer->conf, "prefix limit reached"
 			    " (>%u/%u)", peer->prefix_cnt, peer->conf.max_prefix);
 			rde_update_err(peer, ERR_CEASE, ERR_CEASE_MAX_PREFIX,
@@ -1211,7 +1214,7 @@ rde_update_dispatch(struct imsg *imsg)
 
 				/* max prefix checker */
 				if (peer->conf.max_prefix &&
-				    peer->prefix_cnt >= peer->conf.max_prefix) {
+				    peer->prefix_cnt > peer->conf.max_prefix) {
 					log_peer_warnx(&peer->conf,
 					    "prefix limit reached"
 					    " (>%u/%u)", peer->prefix_cnt,
@@ -1249,7 +1252,7 @@ rde_update_dispatch(struct imsg *imsg)
 
 				/* max prefix checker */
 				if (peer->conf.max_prefix &&
-				    peer->prefix_cnt >= peer->conf.max_prefix) {
+				    peer->prefix_cnt > peer->conf.max_prefix) {
 					log_peer_warnx(&peer->conf,
 					    "prefix limit reached"
 					    " (>%u/%u)", peer->prefix_cnt,
@@ -1571,6 +1574,23 @@ bad_flags:
 				goto bad_len;
 			a->flags |= F_ATTR_PARSE_ERR;
 			log_peer_warnx(&peer->conf, "bad COMMUNITIES, "
+			    "path invalidated and prefix withdrawn");
+		}
+		if (!CHECK_FLAGS(flags, ATTR_OPTIONAL|ATTR_TRANSITIVE,
+		    ATTR_PARTIAL))
+			goto bad_flags;
+		goto optattr;
+	case ATTR_LARGE_COMMUNITIES:
+		if (attr_len % 12 != 0) {
+			/*
+			 * mark update as bad and withdraw all routes as per
+			 * draft-ietf-idr-optional-transitive-00.txt
+			 * but only if partial bit is set
+			 */
+			if ((flags & ATTR_PARTIAL) == 0)
+				goto bad_len;
+			a->flags |= F_ATTR_PARSE_ERR;
+			log_peer_warnx(&peer->conf, "bad LARGE COMMUNITIES, "
 			    "path invalidated and prefix withdrawn");
 		}
 		if (!CHECK_FLAGS(flags, ATTR_OPTIONAL|ATTR_TRANSITIVE,
@@ -2266,6 +2286,10 @@ rde_dump_filter(struct prefix *p, struct ctl_show_rib_request *req)
 		    !community_match(p->aspath, req->community.as,
 		    req->community.type))
 			return;
+		if (req->type == IMSG_CTL_SHOW_RIB_LARGECOMMUNITY &&
+		    !community_large_match(p->aspath, req->large_community.as,
+		    req->large_community.ld1, req->large_community.ld2))
+			return;
 		if ((req->flags & F_CTL_ACTIVE) && p->rib->active != p)
 			return;
 		rde_dump_rib_as(p, p->aspath, req->pid, req->flags);
@@ -2348,6 +2372,7 @@ rde_dump_ctx_new(struct ctl_show_rib_request *req, pid_t pid,
 	case IMSG_CTL_SHOW_RIB:
 	case IMSG_CTL_SHOW_RIB_AS:
 	case IMSG_CTL_SHOW_RIB_COMMUNITY:
+	case IMSG_CTL_SHOW_RIB_LARGECOMMUNITY:
 		ctx->ribctx.ctx_upcall = rde_dump_upcall;
 		break;
 	case IMSG_CTL_SHOW_RIB_PREFIX:

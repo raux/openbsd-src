@@ -1,4 +1,4 @@
-/* $OpenBSD: window.c,v 1.167 2016/09/28 08:30:44 nicm Exp $ */
+/* $OpenBSD: window.c,v 1.174 2016/10/19 09:22:07 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -60,15 +60,25 @@ static u_int	next_window_pane_id;
 static u_int	next_window_id;
 static u_int	next_active_point;
 
+static void	window_destroy(struct window *);
+
+static struct window_pane *window_pane_create(struct window *, u_int, u_int,
+		    u_int);
+static void	window_pane_destroy(struct window_pane *);
+
 static void	window_pane_set_watermark(struct window_pane *, size_t);
 
 static void	window_pane_read_callback(struct bufferevent *, void *);
 static void	window_pane_error_callback(struct bufferevent *, short, void *);
 
+static int	winlink_next_index(struct winlinks *, int);
+
 static struct window_pane *window_pane_choose_best(struct window_pane **,
 		    u_int);
 
 RB_GENERATE(windows, window, entry, window_cmp);
+RB_GENERATE(winlinks, winlink, entry, winlink_cmp);
+RB_GENERATE(window_pane_tree, window_pane, tree_entry, window_pane_cmp);
 
 int
 window_cmp(struct window *w1, struct window *w2)
@@ -76,15 +86,11 @@ window_cmp(struct window *w1, struct window *w2)
 	return (w1->id - w2->id);
 }
 
-RB_GENERATE(winlinks, winlink, entry, winlink_cmp);
-
 int
 winlink_cmp(struct winlink *wl1, struct winlink *wl2)
 {
 	return (wl1->idx - wl2->idx);
 }
-
-RB_GENERATE(window_pane_tree, window_pane, tree_entry, window_pane_cmp);
 
 int
 window_pane_cmp(struct window_pane *wp1, struct window_pane *wp2)
@@ -129,7 +135,7 @@ winlink_find_by_window_id(struct winlinks *wwl, u_int id)
 	return (NULL);
 }
 
-int
+static int
 winlink_next_index(struct winlinks *wwl, int idx)
 {
 	int	i;
@@ -180,6 +186,11 @@ winlink_add(struct winlinks *wwl, int idx)
 void
 winlink_set_window(struct winlink *wl, struct window *w)
 {
+	if (wl->window != NULL) {
+		TAILQ_REMOVE(&wl->window->winlinks, wl, wentry);
+		window_remove_ref(w);
+	}
+	TAILQ_INSERT_TAIL(&w->winlinks, wl, wentry);
 	wl->window = w;
 	w->references++;
 }
@@ -189,12 +200,14 @@ winlink_remove(struct winlinks *wwl, struct winlink *wl)
 {
 	struct window	*w = wl->window;
 
+	if (w != NULL) {
+		TAILQ_REMOVE(&w->winlinks, wl, wentry);
+		window_remove_ref(w);
+	}
+
 	RB_REMOVE(winlinks, wwl, wl);
 	free(wl->status_text);
 	free(wl);
-
-	if (w != NULL)
-		window_remove_ref(w);
 }
 
 struct winlink *
@@ -289,7 +302,7 @@ window_update_activity(struct window *w)
 }
 
 struct window *
-window_create1(u_int sx, u_int sy)
+window_create(u_int sx, u_int sy)
 {
 	struct window	*w;
 
@@ -309,6 +322,7 @@ window_create1(u_int sx, u_int sy)
 	w->options = options_create(global_w_options);
 
 	w->references = 0;
+	TAILQ_INIT(&w->winlinks);
 
 	w->id = next_window_id++;
 	RB_INSERT(windows, &windows, w);
@@ -319,19 +333,19 @@ window_create1(u_int sx, u_int sy)
 }
 
 struct window *
-window_create(const char *name, int argc, char **argv, const char *path,
+window_create_spawn(const char *name, int argc, char **argv, const char *path,
     const char *shell, const char *cwd, struct environ *env,
     struct termios *tio, u_int sx, u_int sy, u_int hlimit, char **cause)
 {
 	struct window		*w;
 	struct window_pane	*wp;
 
-	w = window_create1(sx, sy);
+	w = window_create(sx, sy);
 	wp = window_add_pane(w, NULL, hlimit);
 	layout_init(w, wp);
 
-	if (window_pane_spawn(wp, argc, argv, path, shell, cwd, env, tio,
-	    cause) != 0) {
+	if (window_pane_spawn(wp, argc, argv, path, shell, cwd,
+	    env, tio, cause) != 0) {
 		window_destroy(w);
 		return (NULL);
 	}
@@ -346,9 +360,12 @@ window_create(const char *name, int argc, char **argv, const char *path,
 	return (w);
 }
 
-void
+static void
 window_destroy(struct window *w)
 {
+	if (!TAILQ_EMPTY(&w->winlinks))
+		fatalx("window destroyed with winlinks");
+
 	RB_REMOVE(windows, &windows, w);
 
 	if (w->layout_root != NULL)
@@ -386,7 +403,7 @@ window_set_name(struct window *w, const char *new_name)
 {
 	free(w->name);
 	w->name = xstrdup(new_name);
-	notify_window_renamed(w);
+	notify_window("window-renamed", w);
 }
 
 void
@@ -528,7 +545,7 @@ window_zoom(struct window_pane *wp)
 	w->saved_layout_root = w->layout_root;
 	layout_init(w, wp);
 	w->flags |= WINDOW_ZOOMED;
-	notify_window_layout_changed(w);
+	notify_window("window-layout-changed", w);
 
 	return (0);
 }
@@ -551,7 +568,7 @@ window_unzoom(struct window *w)
 		wp->saved_layout_cell = NULL;
 	}
 	layout_fix_panes(w, w->sx, w->sy);
-	notify_window_layout_changed(w);
+	notify_window("window-layout-changed", w);
 
 	return (0);
 }
@@ -731,7 +748,7 @@ window_pane_find_by_id(u_int id)
 	return (RB_FIND(window_pane_tree, &all_window_panes, &wp));
 }
 
-struct window_pane *
+static struct window_pane *
 window_pane_create(struct window *w, u_int sx, u_int sy, u_int hlimit)
 {
 	struct window_pane	*wp;
@@ -782,7 +799,7 @@ window_pane_create(struct window *w, u_int sx, u_int sy, u_int hlimit)
 	return (wp);
 }
 
-void
+static void
 window_pane_destroy(struct window_pane *wp)
 {
 	window_pane_reset_mode(wp);
@@ -966,7 +983,7 @@ window_pane_read_callback(__unused struct bufferevent *bufev, void *data)
 
 	input_parse(wp);
 
-	wp->pipe_off = size;
+	wp->pipe_off = EVBUFFER_LENGTH(evb);
 }
 
 static void
@@ -1019,7 +1036,7 @@ window_pane_alternate_on(struct window_pane *wp, struct grid_cell *gc,
 	}
 	memcpy(&wp->saved_cell, gc, sizeof wp->saved_cell);
 
-	grid_view_clear(s->grid, 0, 0, sx, sy);
+	grid_view_clear(s->grid, 0, 0, sx, sy, 8);
 
 	wp->base.grid->flags &= ~GRID_HISTORY;
 
@@ -1124,6 +1141,7 @@ window_pane_reset_mode(struct window_pane *wp)
 
 	wp->mode->free(wp);
 	wp->mode = NULL;
+	wp->modeprefix = 1;
 
 	wp->screen = &wp->base;
 	wp->flags |= (PANE_REDRAW|PANE_CHANGED);
@@ -1416,19 +1434,13 @@ window_pane_find_right(struct window_pane *wp)
 void
 winlink_clear_flags(struct winlink *wl)
 {
-	struct session	*s;
-	struct winlink	*wl_loop;
+	struct winlink	*loop;
 
-	RB_FOREACH(s, sessions, &sessions) {
-		RB_FOREACH(wl_loop, winlinks, &s->windows) {
-			if (wl_loop->window != wl->window)
-				continue;
-			if ((wl_loop->flags & WINLINK_ALERTFLAGS) == 0)
-				continue;
-
-			wl_loop->flags &= ~WINLINK_ALERTFLAGS;
-			wl_loop->window->flags &= ~WINDOW_ALERTFLAGS;
-			server_status_session(s);
+	wl->window->flags &= ~WINDOW_ALERTFLAGS;
+	TAILQ_FOREACH(loop, &wl->window->winlinks, wentry) {
+		if ((loop->flags & WINLINK_ALERTFLAGS) != 0) {
+			loop->flags &= ~WINLINK_ALERTFLAGS;
+			server_status_session(loop->session);
 		}
 	}
 }
