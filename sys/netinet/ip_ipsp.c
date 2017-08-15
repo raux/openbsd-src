@@ -1,4 +1,4 @@
-/*	$OpenBSD: ip_ipsp.c,v 1.217 2016/09/20 14:01:04 mikeb Exp $	*/
+/*	$OpenBSD: ip_ipsp.c,v 1.226 2017/08/11 21:24:20 mpi Exp $	*/
 /*
  * The authors of this code are John Ioannidis (ji@tla.org),
  * Angelos D. Keromytis (kermit@csd.uch.gr),
@@ -54,6 +54,7 @@
 #include <netinet/ip.h>
 #include <netinet/in_pcb.h>
 #include <netinet/ip_var.h>
+#include <netinet/ip_ipip.h>
 
 #if NPF > 0
 #include <net/pfvar.h>
@@ -113,25 +114,58 @@ RBT_GENERATE(ipsec_ids_flows, ipsec_ids, id_node_id, ipsp_ids_flow_cmp);
 
 struct xformsw xformsw[] = {
 #ifdef IPSEC
-	{ XF_IP4,	     0,               "IPv4 Simple Encapsulation",
-	  ipe4_attach,       ipe4_init,       ipe4_zeroize,
-	  (int (*)(struct mbuf *, struct tdb *, int, int))ipe4_input,
-	  ipip_output, },
-	{ XF_AH,	 XFT_AUTH,	    "IPsec AH",
-	  ah_attach,	ah_init,   ah_zeroize,
-	  ah_input,	 	ah_output, },
-	{ XF_ESP,	 XFT_CONF|XFT_AUTH, "IPsec ESP",
-	  esp_attach,	esp_init,  esp_zeroize,
-	  esp_input,	esp_output, },
-	{ XF_IPCOMP,	XFT_COMP, "IPcomp",
-	  ipcomp_attach,    ipcomp_init, ipcomp_zeroize,
-	  ipcomp_input,     ipcomp_output, },
+{
+  .xf_type	= XF_IP4,
+  .xf_flags	= 0,
+  .xf_name	= "IPv4 Simple Encapsulation",
+  .xf_attach	= ipe4_attach,
+  .xf_init	= ipe4_init,
+  .xf_zeroize	= ipe4_zeroize,
+  .xf_input	= ipe4_input,
+  .xf_output	= ipip_output,
+},
+{
+  .xf_type	= XF_AH,
+  .xf_flags	= XFT_AUTH,
+  .xf_name	= "IPsec AH",
+  .xf_attach	= ah_attach,
+  .xf_init	= ah_init,
+  .xf_zeroize	= ah_zeroize,
+  .xf_input	= ah_input,
+  .xf_output	= ah_output,
+},
+{
+  .xf_type	= XF_ESP,
+  .xf_flags	= XFT_CONF|XFT_AUTH,
+  .xf_name	= "IPsec ESP",
+  .xf_attach	= esp_attach,
+  .xf_init	= esp_init,
+  .xf_zeroize	= esp_zeroize,
+  .xf_input	= esp_input,
+  .xf_output	= esp_output,
+},
+{
+  .xf_type	= XF_IPCOMP,
+  .xf_flags	= XFT_COMP,
+  .xf_name	= "IPcomp",
+  .xf_attach	= ipcomp_attach,
+  .xf_init	= ipcomp_init,
+  .xf_zeroize	= ipcomp_zeroize,
+  .xf_input	= ipcomp_input,
+  .xf_output	= ipcomp_output,
+},
 #endif /* IPSEC */
 #ifdef TCP_SIGNATURE
-	{ XF_TCPSIGNATURE,	 XFT_AUTH, "TCP MD5 Signature Option, RFC 2385",
-	  tcp_signature_tdb_attach, 	tcp_signature_tdb_init,
-	  tcp_signature_tdb_zeroize,	tcp_signature_tdb_input,
-	  tcp_signature_tdb_output, }
+{
+  .xf_type	= XF_TCPSIGNATURE,
+  .xf_flags	= XFT_AUTH,
+  .xf_name	= "TCP MD5 Signature Option, RFC 2385",
+  .xf_attach	= tcp_signature_tdb_attach,
+  .xf_init	= tcp_signature_tdb_init,
+  .xf_zeroize	= tcp_signature_tdb_zeroize,
+  .xf_input	= tcp_signature_tdb_input,
+  .xf_output	= tcp_signature_tdb_output,
+}
 #endif /* TCP_SIGNATURE */
 };
 
@@ -160,7 +194,7 @@ tdb_hash(u_int rdomain, u_int32_t spi, union sockaddr_union *dst,
 	SipHash24_Update(&ctx, &rdomain, sizeof(rdomain));
 	SipHash24_Update(&ctx, &spi, sizeof(spi));
 	SipHash24_Update(&ctx, &proto, sizeof(proto));
-	SipHash24_Update(&ctx, dst, SA_LEN(&dst->sa));
+	SipHash24_Update(&ctx, dst, dst->sa.sa_len);
 
 	return (SipHash24_End(&ctx) & tdb_hashmask);
 }
@@ -176,7 +210,9 @@ reserve_spi(u_int rdomain, u_int32_t sspi, u_int32_t tspi,
 {
 	struct tdb *tdbp, *exists;
 	u_int32_t spi;
-	int nums, s;
+	int nums;
+
+	NET_ASSERT_LOCKED();
 
 	/* Don't accept ranges only encompassing reserved SPIs. */
 	if (sproto != IPPROTO_IPCOMP &&
@@ -229,17 +265,14 @@ reserve_spi(u_int rdomain, u_int32_t sspi, u_int32_t tspi,
 			spi = htonl(spi);
 
 		/* Check whether we're using this SPI already. */
-		s = splsoftnet();
 		exists = gettdb(rdomain, spi, dst, sproto);
-		splx(s);
-
 		if (exists)
 			continue;
 
 
 		tdbp->tdb_spi = spi;
-		memcpy(&tdbp->tdb_dst.sa, &dst->sa, SA_LEN(&dst->sa));
-		memcpy(&tdbp->tdb_src.sa, &src->sa, SA_LEN(&src->sa));
+		memcpy(&tdbp->tdb_dst.sa, &dst->sa, dst->sa.sa_len);
+		memcpy(&tdbp->tdb_src.sa, &src->sa, src->sa.sa_len);
 		tdbp->tdb_sproto = sproto;
 		tdbp->tdb_flags |= TDBF_INVALID; /* Mark SA invalid for now. */
 		tdbp->tdb_satype = SADB_SATYPE_UNSPEC;
@@ -267,14 +300,14 @@ reserve_spi(u_int rdomain, u_int32_t sspi, u_int32_t tspi,
  * When we receive an IPSP packet, we need to look up its tunnel descriptor
  * block, based on the SPI in the packet and the destination address (which
  * is really one of our addresses if we received the packet!
- *
- * Caller is responsible for setting at least splsoftnet().
  */
 struct tdb *
 gettdb(u_int rdomain, u_int32_t spi, union sockaddr_union *dst, u_int8_t proto)
 {
 	u_int32_t hashval;
 	struct tdb *tdbp;
+
+	NET_ASSERT_LOCKED();
 
 	if (tdbh == NULL)
 		return (struct tdb *) NULL;
@@ -284,7 +317,7 @@ gettdb(u_int rdomain, u_int32_t spi, union sockaddr_union *dst, u_int8_t proto)
 	for (tdbp = tdbh[hashval]; tdbp != NULL; tdbp = tdbp->tdb_hnext)
 		if ((tdbp->tdb_spi == spi) && (tdbp->tdb_sproto == proto) &&
 		    (tdbp->tdb_rdomain == rdomain) &&
-		    !memcmp(&tdbp->tdb_dst, dst, SA_LEN(&dst->sa)))
+		    !memcmp(&tdbp->tdb_dst, dst, dst->sa.sa_len))
 			break;
 
 	return tdbp;
@@ -314,8 +347,8 @@ gettdbbysrcdst(u_int rdomain, u_int32_t spi, union sockaddr_union *src,
 		    (tdbp->tdb_rdomain == rdomain) &&
 		    ((tdbp->tdb_flags & TDBF_INVALID) == 0) &&
 		    (tdbp->tdb_dst.sa.sa_family == AF_UNSPEC ||
-		    !memcmp(&tdbp->tdb_dst, dst, SA_LEN(&dst->sa))) &&
-		    !memcmp(&tdbp->tdb_src, src, SA_LEN(&src->sa)))
+		    !memcmp(&tdbp->tdb_dst, dst, dst->sa.sa_len)) &&
+		    !memcmp(&tdbp->tdb_src, src, src->sa.sa_len))
 			break;
 
 	if (tdbp != NULL)
@@ -331,7 +364,7 @@ gettdbbysrcdst(u_int rdomain, u_int32_t spi, union sockaddr_union *src,
 		    (tdbp->tdb_rdomain == rdomain) &&
 		    ((tdbp->tdb_flags & TDBF_INVALID) == 0) &&
 		    (tdbp->tdb_dst.sa.sa_family == AF_UNSPEC ||
-		    !memcmp(&tdbp->tdb_dst, dst, SA_LEN(&dst->sa))) &&
+		    !memcmp(&tdbp->tdb_dst, dst, dst->sa.sa_len)) &&
 		    tdbp->tdb_src.sa.sa_family == AF_UNSPEC)
 			break;
 
@@ -396,7 +429,7 @@ gettdbbydst(u_int rdomain, union sockaddr_union *dst, u_int8_t sproto,
 		if ((tdbp->tdb_sproto == sproto) &&
 		    (tdbp->tdb_rdomain == rdomain) &&
 		    ((tdbp->tdb_flags & TDBF_INVALID) == 0) &&
-		    (!memcmp(&tdbp->tdb_dst, dst, SA_LEN(&dst->sa)))) {
+		    (!memcmp(&tdbp->tdb_dst, dst, dst->sa.sa_len))) {
 			/* Do IDs match ? */
 			if (!ipsp_aux_match(tdbp, ids, filter, filtermask))
 				continue;
@@ -427,7 +460,7 @@ gettdbbysrc(u_int rdomain, union sockaddr_union *src, u_int8_t sproto,
 		if ((tdbp->tdb_sproto == sproto) &&
 		    (tdbp->tdb_rdomain == rdomain) &&
 		    ((tdbp->tdb_flags & TDBF_INVALID) == 0) &&
-		    (!memcmp(&tdbp->tdb_src, src, SA_LEN(&src->sa)))) {
+		    (!memcmp(&tdbp->tdb_src, src, src->sa.sa_len))) {
 			/* Check whether IDs match */
 			if (!ipsp_aux_match(tdbp, ids, filter,
 			    filtermask))
@@ -469,14 +502,13 @@ tdb_hashstats(void)
 }
 #endif	/* DDB */
 
-/*
- * Caller is responsible for setting at least splsoftnet().
- */
 int
 tdb_walk(u_int rdomain, int (*walker)(struct tdb *, void *, int), void *arg)
 {
 	int i, rval = 0;
 	struct tdb *tdbp, *next;
+
+	NET_ASSERT_LOCKED();
 
 	if (tdbh == NULL)
 		return ENOENT;
@@ -504,78 +536,73 @@ void
 tdb_timeout(void *v)
 {
 	struct tdb *tdb = v;
-	int s;
 
 	if (!(tdb->tdb_flags & TDBF_TIMER))
 		return;
 
-	s = splsoftnet();
+	NET_LOCK();
 	/* If it's an "invalid" TDB do a silent expiration. */
 	if (!(tdb->tdb_flags & TDBF_INVALID))
 		pfkeyv2_expire(tdb, SADB_EXT_LIFETIME_HARD);
 	tdb_delete(tdb);
-	splx(s);
+	NET_UNLOCK();
 }
 
 void
 tdb_firstuse(void *v)
 {
 	struct tdb *tdb = v;
-	int s;
 
 	if (!(tdb->tdb_flags & TDBF_SOFT_FIRSTUSE))
 		return;
 
-	s = splsoftnet();
+	NET_LOCK();
 	/* If the TDB hasn't been used, don't renew it. */
 	if (tdb->tdb_first_use != 0)
 		pfkeyv2_expire(tdb, SADB_EXT_LIFETIME_HARD);
 	tdb_delete(tdb);
-	splx(s);
+	NET_UNLOCK();
 }
 
 void
 tdb_soft_timeout(void *v)
 {
 	struct tdb *tdb = v;
-	int s;
 
 	if (!(tdb->tdb_flags & TDBF_SOFT_TIMER))
 		return;
 
-	s = splsoftnet();
+	NET_LOCK();
 	/* Soft expirations. */
 	pfkeyv2_expire(tdb, SADB_EXT_LIFETIME_SOFT);
 	tdb->tdb_flags &= ~TDBF_SOFT_TIMER;
-	splx(s);
+	NET_UNLOCK();
 }
 
 void
 tdb_soft_firstuse(void *v)
 {
 	struct tdb *tdb = v;
-	int s;
 
 	if (!(tdb->tdb_flags & TDBF_SOFT_FIRSTUSE))
 		return;
 
-	s = splsoftnet();
+	NET_LOCK();
 	/* If the TDB hasn't been used, don't renew it. */
 	if (tdb->tdb_first_use != 0)
 		pfkeyv2_expire(tdb, SADB_EXT_LIFETIME_SOFT);
 	tdb->tdb_flags &= ~TDBF_SOFT_FIRSTUSE;
-	splx(s);
+	NET_UNLOCK();
 }
 
-/*
- * Caller is responsible for splsoftnet().
- */
 void
 tdb_rehash(void)
 {
 	struct tdb **new_tdbh, **new_tdbdst, **new_srcaddr, *tdbp, *tdbnp;
 	u_int i, old_hashmask = tdb_hashmask;
 	u_int32_t hashval;
+
+	NET_ASSERT_LOCKED();
 
 	tdb_hashmask = (tdb_hashmask << 1) | 1;
 
@@ -633,7 +660,8 @@ void
 puttdb(struct tdb *tdbp)
 {
 	u_int32_t hashval;
-	int s = splsoftnet();
+
+	NET_ASSERT_LOCKED();
 
 	if (tdbh == NULL) {
 		arc4random_buf(&tdbkey, sizeof(tdbkey));
@@ -679,24 +707,18 @@ puttdb(struct tdb *tdbp)
 	tdb_count++;
 
 	ipsec_last_added = time_second;
-
-	splx(s);
 }
 
-/*
- * Caller is responsible to set at least splsoftnet().
- */
 void
-tdb_delete(struct tdb *tdbp)
+tdb_unlink(struct tdb *tdbp)
 {
 	struct tdb *tdbpp;
 	u_int32_t hashval;
-	int s;
+
+	NET_ASSERT_LOCKED();
 
 	if (tdbh == NULL)
 		return;
-
-	s = splsoftnet();
 
 	hashval = tdb_hash(tdbp->tdb_rdomain, tdbp->tdb_spi,
 	    &tdbp->tdb_dst, tdbp->tdb_sproto);
@@ -749,10 +771,16 @@ tdb_delete(struct tdb *tdbp)
 	}
 
 	tdbp->tdb_snext = NULL;
-	tdb_free(tdbp);
 	tdb_count--;
+}
 
-	splx(s);
+void
+tdb_delete(struct tdb *tdbp)
+{
+	NET_ASSERT_LOCKED();
+
+	tdb_unlink(tdbp);
+	tdb_free(tdbp);
 }
 
 /*
@@ -774,10 +802,10 @@ tdb_alloc(u_int rdomain)
 	tdbp->tdb_rdomain = rdomain;
 
 	/* Initialize timeouts. */
-	timeout_set(&tdbp->tdb_timer_tmo, tdb_timeout, tdbp);
-	timeout_set(&tdbp->tdb_first_tmo, tdb_firstuse, tdbp);
-	timeout_set(&tdbp->tdb_stimer_tmo, tdb_soft_timeout, tdbp);
-	timeout_set(&tdbp->tdb_sfirst_tmo, tdb_soft_firstuse, tdbp);
+	timeout_set_proc(&tdbp->tdb_timer_tmo, tdb_timeout, tdbp);
+	timeout_set_proc(&tdbp->tdb_first_tmo, tdb_firstuse, tdbp);
+	timeout_set_proc(&tdbp->tdb_stimer_tmo, tdb_soft_timeout, tdbp);
+	timeout_set_proc(&tdbp->tdb_sfirst_tmo, tdb_soft_firstuse, tdbp);
 
 	return tdbp;
 }
@@ -943,7 +971,7 @@ ipsp_ids_insert(struct ipsec_ids *ids)
 	}
 	ids->id_refcount = 1;
 	DPRINTF(("%s: new ids %p flow %u\n", __func__, ids, ids->id_flow));
-	timeout_set(&ids->id_timeout, ipsp_ids_timeout, ids);
+	timeout_set_proc(&ids->id_timeout, ipsp_ids_timeout, ids);
 	return ids;
 }
 
@@ -961,17 +989,17 @@ void
 ipsp_ids_timeout(void *arg)
 {
 	struct ipsec_ids *ids = arg;
-	int s;
 
 	DPRINTF(("%s: ids %p count %d\n", __func__, ids, ids->id_refcount));
 	KASSERT(ids->id_refcount == 0);
-	s = splsoftnet();
+
+	NET_LOCK();
 	RBT_REMOVE(ipsec_ids_tree, &ipsec_ids_tree, ids);
 	RBT_REMOVE(ipsec_ids_flows, &ipsec_ids_flows, ids);
 	free(ids->id_local, M_CREDENTIALS, 0);
 	free(ids->id_remote, M_CREDENTIALS, 0);
 	free(ids, M_CREDENTIALS, 0);
-	splx(s);
+	NET_UNLOCK();
 }
 
 /* decrements refcount, actual free happens in timeout */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: trap.c,v 1.126 2016/10/08 05:49:08 guenther Exp $	*/
+/*	$OpenBSD: trap.c,v 1.132 2017/07/20 18:22:25 bluhm Exp $	*/
 /*	$NetBSD: trap.c,v 1.95 1996/05/05 06:50:02 mycroft Exp $	*/
 
 /*-
@@ -60,10 +60,6 @@
 #include <machine/trap.h>
 #ifdef DDB
 #include <machine/db_machdep.h>
-#endif
-
-#ifdef KGDB
-#include <sys/kgdb.h>
 #endif
 
 #include <sys/exec.h>
@@ -159,28 +155,13 @@ trap(struct trapframe *frame)
 
 	/* trace trap */
 	case T_TRCTRAP:
-#if !(defined(DDB) || defined(KGDB))
+#ifndef DDB
 		return;	/* Just return if no kernel debugger */
 #endif
 		/* FALLTHROUGH */
 
 	default:
 	we_re_toast:
-#ifdef KGDB
-		if (kgdb_trap(type, frame))
-			return;
-		else {
-			/*
-			 * If this is a breakpoint, don't panic
-			 * if we're not connected.
-			 */
-			if (type == T_BPTFLT) {
-				printf("kgdb: ignored %s\n", trap_type[type]);
-				return;
-			}
-		}
-#endif
-
 #ifdef DDB
 		if (db_ktrap(type, 0, frame))
 			return;
@@ -375,11 +356,6 @@ trap(struct trapframe *frame)
 			goto we_re_toast;
 
 		pcb = &p->p_addr->u_pcb;
-#if 0
-		/* XXX - check only applies to 386's and 486's with WP off */
-		if (frame->tf_err & PGEX_P)
-			goto we_re_toast;
-#endif
 		cr2 = rcr2();
 		KERNEL_LOCK();
 		/* This will only trigger if SMEP is enabled */
@@ -397,7 +373,8 @@ trap(struct trapframe *frame)
 		vaddr_t va, fa;
 		struct vmspace *vm;
 		struct vm_map *map;
-		int rv;
+		int error;
+		int signal, sicode;
 
 		cr2 = rcr2();
 		KERNEL_LOCK();
@@ -430,12 +407,12 @@ trap(struct trapframe *frame)
 		if (curcpu()->ci_inatomic == 0 || map == kernel_map) {
 			onfault = p->p_addr->u_pcb.pcb_onfault;
 			p->p_addr->u_pcb.pcb_onfault = NULL;
-			rv = uvm_fault(map, va, 0, ftype);
+			error = uvm_fault(map, va, 0, ftype);
 			p->p_addr->u_pcb.pcb_onfault = onfault;
 		} else
-			rv = EFAULT;
+			error = EFAULT;
 
-		if (rv == 0) {
+		if (error == 0) {
 			if (map != kernel_map)
 				uvm_grow(p, va);
 			if (type == T_PAGEFLT) {
@@ -452,17 +429,26 @@ trap(struct trapframe *frame)
 				goto copyfault;
 			}
 			printf("uvm_fault(%p, 0x%lx, 0, %d) -> %x\n",
-			    map, va, ftype, rv);
+			    map, va, ftype, error);
 			goto we_re_toast;
 		}
+
+		signal = SIGSEGV;
+		sicode = SEGV_MAPERR;
+		if (error == EACCES)
+			sicode = SEGV_ACCERR;
+		if (error == EIO) {
+			signal = SIGBUS;
+			sicode = BUS_OBJERR;
+		}
 		sv.sival_int = fa;
-		trapsignal(p, SIGSEGV, vftype, SEGV_MAPERR, sv);
+		trapsignal(p, signal, vftype, sicode, sv);
 		KERNEL_UNLOCK();
 		break;
 	}
 
 #if 0  /* Should this be left out?  */
-#if !defined(DDB) && !defined(KGDB)
+#if !defined(DDB)
 	/* XXX need to deal with this when DDB is present, too */
 	case T_TRCTRAP: /* kernel trace trap; someone single stepping lcall's */
 			/* syscall has to turn off the trace bit itself */
@@ -483,21 +469,15 @@ trap(struct trapframe *frame)
 		KERNEL_UNLOCK();
 		break;
 
-#if	NISA > 0
+#if NISA > 0
 	case T_NMI:
 	case T_NMI|T_USER:
-#if defined(DDB) || defined(KGDB)
+#ifdef DDB
 		/* NMI can be hooked up to a pushbutton for debugging */
 		printf ("NMI ... going to debugger\n");
-#ifdef KGDB
-		if (kgdb_trap(type, frame))
-			return;
-#endif
-#ifdef DDB
 		if (db_ktrap(type, 0, frame))
 			return;
 #endif
-#endif /* DDB || KGDB */
 		/* machine/parity/power fail/"kitchen sink" faults */
 		if (isa_nmi() == 0)
 			return;
@@ -625,10 +605,7 @@ syscall(struct trapframe *frame)
 		break;
 	default:
 	bad:
-		if (p->p_p->ps_emul->e_errno && error >= 0 && error <= ELAST)
-			frame->tf_eax = p->p_p->ps_emul->e_errno[error];
-		else
-			frame->tf_eax = error;
+		frame->tf_eax = error;
 		frame->tf_eflags |= PSL_C;	/* carry bit */
 		break;
 	}

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uaudio.c,v 1.117 2016/10/27 05:08:23 ratchov Exp $ */
+/*	$OpenBSD: uaudio.c,v 1.127 2017/05/03 06:58:11 ratchov Exp $ */
 /*	$NetBSD: uaudio.c,v 1.90 2004/10/29 17:12:53 kent Exp $	*/
 
 /*
@@ -371,7 +371,6 @@ void	uaudio_chan_rintr
 
 int	uaudio_open(void *, int);
 void	uaudio_close(void *);
-int	uaudio_drain(void *);
 void	uaudio_get_minmax_rates
 	(int, const struct as_info *, const struct audio_params *,
 	 int, int, int, u_long *, u_long *);
@@ -563,7 +562,6 @@ int
 uaudio_detach(struct device *self, int flags)
 {
 	struct uaudio_softc *sc = (struct uaudio_softc *)self;
-	int rv = 0;
 
 	/*
 	 * sc_alts may be NULL if uaudio_identify_as() failed, in
@@ -571,14 +569,8 @@ uaudio_detach(struct device *self, int flags)
 	 * nothing to detach.
 	 */
 	if (sc->sc_alts == NULL)
-		return (rv);
-
-	/* Wait for outstanding requests to complete. */
-	uaudio_drain(sc);
-
-	rv = config_detach_children(self, flags);
-
-	return (rv);
+		return (0);
+	return (config_detach_children(self, flags));
 }
 
 const usb_interface_descriptor_t *
@@ -622,8 +614,8 @@ uaudio_mixer_add_ctl(struct uaudio_softc *sc, struct mixerctl *mc)
 
 	/* Copy old data, if there was any */
 	if (sc->sc_nctls != 0) {
-		bcopy(sc->sc_ctls, nmc, sizeof(*mc) * (sc->sc_nctls));
-		free(sc->sc_ctls, M_USBDEV, 0);
+		memcpy(nmc, sc->sc_ctls, sizeof(*mc) * (sc->sc_nctls));
+		free(sc->sc_ctls, M_USBDEV, sc->sc_nctls * sizeof(*mc));
 	}
 	sc->sc_ctls = nmc;
 
@@ -1254,10 +1246,8 @@ uaudio_add_processing(struct uaudio_softc *sc, const struct io_terminal *iot, in
 	case CHORUS_PROCESS:
 	case DYN_RANGE_COMP_PROCESS:
 	default:
-#ifdef UAUDIO_DEBUG
-		printf("%s: unit %d, type=%d not impl.\n",
-		       __func__, d->bUnitId, ptype);
-#endif
+		DPRINTF(("%s: unit %d, type=%d not impl.\n",
+		       __func__, d->bUnitId, ptype));
 		break;
 	}
 }
@@ -1489,7 +1479,6 @@ uaudio_identify(struct uaudio_softc *sc, const usb_config_descriptor_t *cdesc)
 void
 uaudio_add_alt(struct uaudio_softc *sc, const struct as_info *ai)
 {
-	size_t len;
 	struct as_info *nai;
 
 	nai = mallocarray(sc->sc_nalts + 1, sizeof(*ai), M_USBDEV, M_NOWAIT);
@@ -1497,12 +1486,11 @@ uaudio_add_alt(struct uaudio_softc *sc, const struct as_info *ai)
 		printf("%s: no memory\n", __func__);
 		return;
 	}
-	len = sizeof(*ai) * (sc->sc_nalts + 1);
 
 	/* Copy old data, if there was any */
 	if (sc->sc_nalts != 0) {
-		bcopy(sc->sc_alts, nai, sizeof(*ai) * (sc->sc_nalts));
-		free(sc->sc_alts, M_USBDEV, 0);
+		memcpy(nai, sc->sc_alts, sizeof(*ai) * (sc->sc_nalts));
+		free(sc->sc_alts, M_USBDEV, sc->sc_nalts * sizeof(*ai));
 	}
 	sc->sc_alts = nai;
 	DPRINTFN(2,("%s: adding alt=%d, enc=%d\n",
@@ -1833,7 +1821,7 @@ uaudio_identify_ac(struct uaudio_softc *sc, const usb_config_descriptor_t *cdesc
 	ibufend = ibuf + aclen;
 	dp = (const usb_descriptor_t *)ibuf;
 	ndps = 0;
-	iot = malloc(256 * sizeof(struct io_terminal),
+	iot = mallocarray(256, sizeof(struct io_terminal),
 	    M_TEMP, M_NOWAIT | M_ZERO);
 	if (iot == NULL) {
 		printf("%s: no memory\n", __func__);
@@ -1993,7 +1981,7 @@ uaudio_identify_ac(struct uaudio_softc *sc, const usb_config_descriptor_t *cdesc
 			free(iot[i].output, M_TEMP, 0);
 		iot[i].d.desc = NULL;
 	}
-	free(iot, M_TEMP, 0);
+	free(iot, M_TEMP, 256 * sizeof(struct io_terminal));
 
 	return (USBD_NORMAL_COMPLETION);
 }
@@ -2111,24 +2099,6 @@ uaudio_close(void *addr)
 		uaudio_chan_close(sc, &sc->sc_playchan);
 	if (sc->sc_recchan.altidx != -1)
 		uaudio_chan_close(sc, &sc->sc_recchan);
-}
-
-int
-uaudio_drain(void *addr)
-{
-	struct uaudio_softc *sc = addr;
-	struct chan *pchan = &sc->sc_playchan;
-	struct chan *rchan = &sc->sc_recchan;
-	int ms = 0;
-
-	/* Wait for outstanding requests to complete. */
-	if (pchan->altidx != -1 && sc->sc_alts[pchan->altidx].sc_busy)
-		ms = max(ms, pchan->reqms);
-	if (rchan->altidx != -1 && sc->sc_alts[rchan->altidx].sc_busy)
-		ms = max(ms, rchan->reqms);
-	usbd_delay_ms(sc->sc_udev, UAUDIO_NCHANBUFS * ms);
-
-	return (0);
 }
 
 int
@@ -2900,7 +2870,7 @@ void
 uaudio_chan_rtransfer(struct chan *ch)
 {
 	struct chanbuf *cb;
-	int i, size, residue, total;
+	int i, size, total;
 
 	if (usbd_is_dying(ch->sc->sc_udev))
 		return;
@@ -2911,7 +2881,6 @@ uaudio_chan_rtransfer(struct chan *ch)
 		ch->curchanbuf = 0;
 
 	/* Compute the size of each frame in the next transfer. */
-	residue = ch->residue;
 	total = 0;
 	for (i = 0; i < ch->nframes; i++) {
 		size = ch->bytes_per_frame;
@@ -2919,7 +2888,6 @@ uaudio_chan_rtransfer(struct chan *ch)
 		cb->offsets[i] = total;
 		total += size;
 	}
-	ch->residue = residue;
 	cb->size = total;
 
 #ifdef UAUDIO_DEBUG
@@ -3019,7 +2987,7 @@ uaudio_chan_init(struct chan *ch, int mode, int altidx,
 		    __func__, altidx));
 		use_maxpkt = 1;
 	}
-	if (mode == AUMODE_RECORD) {
+	else if (mode == AUMODE_RECORD) {
 		DPRINTF(("%s: using maxpktsize packets for record channel\n",
 		    __func__));
 		use_maxpkt = 1;

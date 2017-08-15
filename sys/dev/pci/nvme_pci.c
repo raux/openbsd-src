@@ -1,4 +1,4 @@
-/*	$OpenBSD: nvme_pci.c,v 1.4 2016/10/25 06:20:41 dlg Exp $ */
+/*	$OpenBSD: nvme_pci.c,v 1.6 2017/07/03 23:27:53 dlg Exp $ */
 
 /*
  * Copyright (c) 2014 David Gwynne <dlg@openbsd.org>
@@ -70,8 +70,16 @@ nvme_pci_match(struct device *parent, void *match, void *aux)
 	    PCI_INTERFACE(pa->pa_class) == NVME_PCI_INTERFACE)
 		return (1);
 
+	if (PCI_VENDOR(pa->pa_id) == PCI_VENDOR_APPLE &&
+	    PCI_PRODUCT(pa->pa_id) == PCI_PRODUCT_APPLE_NVME)
+	    	return (1);
+
 	return (0);
 }
+
+static const struct pci_matchid nvme_msi_blacklist[] = {
+	{ PCI_VENDOR_INTEL,	PCI_PRODUCT_INTEL_OPTANE },
+};
 
 void
 nvme_pci_attach(struct device *parent, struct device *self, void *aux)
@@ -85,6 +93,9 @@ nvme_pci_attach(struct device *parent, struct device *self, void *aux)
 
 	psc->psc_pc = pa->pa_pc;
 	sc->sc_dmat = pa->pa_dmat;
+
+	if (pci_matchbyid(pa, nvme_msi_blacklist, nitems(nvme_msi_blacklist)))
+		CLR(pa->pa_flags, PCI_FLAGS_MSI_ENABLED);
 
 	maptype = pci_mapreg_type(pa->pa_pc, pa->pa_tag, NVME_PCI_BAR);
 	if (pci_mapreg_map(pa, NVME_PCI_BAR, maptype, 0,

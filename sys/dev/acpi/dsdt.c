@@ -1,4 +1,4 @@
-/* $OpenBSD: dsdt.c,v 1.227 2016/10/25 06:48:58 pirofti Exp $ */
+/* $OpenBSD: dsdt.c,v 1.234 2017/05/28 15:36:45 anton Exp $ */
 /*
  * Copyright (c) 2005 Jordan Hargrave <jordan@openbsd.org>
  *
@@ -46,9 +46,6 @@
 #define AML_INTSTRLEN		16
 #define AML_NAMESEG_LEN		4
 
-struct acpi_q		*acpi_maptable(struct acpi_softc *sc, paddr_t,
-			    const char *, const char *,
-			    const char *, int);
 struct aml_scope	*aml_load(struct acpi_softc *, struct aml_scope *,
 			    struct aml_value *, struct aml_value *);
 
@@ -105,6 +102,8 @@ void			_aml_die(const char *fn, int line, const char *fmt, ...);
 
 void aml_notify_task(void *, int);
 void acpi_poll_notify_task(void *, int);
+
+extern char		*hw_vendor;
 
 /*
  * @@@: Global variables
@@ -407,7 +406,8 @@ acpi_walkmem(int sig, const char *lbl)
 {
 	struct acpi_memblock *sptr;
 
-	printf("--- walkmem:%s %x --- %x bytes alloced\n", lbl, sig, acpi_nalloc);
+	printf("--- walkmem:%s %x --- %lx bytes alloced\n", lbl, sig,
+	    acpi_nalloc);
 	LIST_FOREACH(sptr, &acpi_memhead, link) {
 		if (sptr->sig < sig)
 			break;
@@ -587,7 +587,7 @@ aml_notify_dev(const char *pnpid, int notify_value)
 		return;
 
 	SLIST_FOREACH(pdata, &aml_notify_list, link)
-		if (pdata->pnpid && !strcmp(pdata->pnpid, pnpid))
+		if (strcmp(pdata->pnpid, pnpid) == 0)
 			pdata->cbproc(pdata->node, notify_value, pdata->cbarg);
 }
 
@@ -1260,7 +1260,7 @@ aml_find_node(struct aml_node *node, const char *name,
 
 	SIMPLEQ_FOREACH(child, &node->son, sib) {
 		nn = child->name;
-		if ((nn = child->name) != NULL) {
+		if (nn != NULL) {
 			if (*nn == AMLOP_ROOTCHAR) nn++;
 			while (*nn == AMLOP_PARENTPREFIX) nn++;
 			if (strcmp(name, nn) == 0) {
@@ -1505,6 +1505,21 @@ aml_callosi(struct aml_scope *scope, struct aml_value *val)
 	struct aml_value *fa;
 
 	fa = aml_getstack(scope, AMLOP_ARG0);
+
+	if (hw_vendor != NULL &&
+	    (strcmp(hw_vendor, "Apple Inc.") == 0 ||
+	    strcmp(hw_vendor, "Apple Computer, Inc.") == 0)) {
+		if (strcmp(fa->v_string, "Darwin") == 0) {
+			dnprintf(10,"osi: returning 1 for %s on %s hardware\n",
+			    fa->v_string, hw_vendor);
+			result = 1;
+		} else
+			dnprintf(10,"osi: on %s hardware, but ignoring %s\n",
+			    hw_vendor, fa->v_string);
+
+		return aml_allocvalue(AML_OBJTYPE_INTEGER, result, NULL);
+	}
+
 	for (idx=0; !result && aml_valid_osi[idx] != NULL; idx++) {
 		dnprintf(10,"osi: %s,%s\n", fa->v_string, aml_valid_osi[idx]);
 		result = !strcmp(fa->v_string, aml_valid_osi[idx]);

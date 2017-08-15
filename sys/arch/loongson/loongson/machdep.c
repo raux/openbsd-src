@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.67 2016/10/09 11:25:39 tom Exp $ */
+/*	$OpenBSD: machdep.c,v 1.79 2017/07/12 06:26:33 natano Exp $ */
 
 /*
  * Copyright (c) 2009, 2010, 2014 Miodrag Vallat.
@@ -114,10 +114,20 @@ caddr_t	msgbufbase;
 
 int	physmem;		/* Max supported memory, changes to actual. */
 int	ncpu = 1;		/* At least one CPU in the system. */
+int	nnodes = 1;		/* Number of NUMA nodes, only on 3A. */
 struct	user *proc0paddr;
+int	lid_action = 1;
+
+#ifdef MULTIPROCESSOR
+uint64_t cpu_spinup_a0;
+uint64_t cpu_spinup_sp;
+uint32_t ipi_mask;
+#endif
 
 const struct platform *sys_platform;
 struct cpu_hwinfo bootcpu_hwinfo;
+void *loongson_videobios;
+uint loongson_cpumask = 1;
 uint loongson_ver;
 
 /* Pointers to the start and end of the symbol table. */
@@ -141,6 +151,8 @@ void	dumpconf(void);
 extern	void parsepmonbp(void);
 const struct platform *loongson_identify(const char *, int);
 vaddr_t	mips_init(uint64_t, uint64_t, uint64_t, uint64_t, char *);
+
+extern	void htb_early_setup(void);
 
 extern	void loongson2e_setup(u_long, u_long);
 extern	void loongson2f_setup(u_long, u_long);
@@ -173,8 +185,8 @@ extern const struct platform ebenton_platform;
 extern const struct platform fuloong_platform;
 extern const struct platform gdium_platform;
 extern const struct platform generic2e_platform;
-extern const struct platform lemote3a_platform;
 extern const struct platform lynloong_platform;
+extern const struct platform rs780e_platform;
 extern const struct platform yeeloong_platform;
 
 const struct bonito_flavour bonito_flavours[] = {
@@ -198,12 +210,12 @@ const struct bonito_flavour bonito_flavours[] = {
 #endif
 #ifdef CPU_LOONGSON3
 	/* Laptops */
-	{ "A1004",	&lemote3a_platform },	/* 3A */
-	{ "A1201",	&lemote3a_platform },	/* 2Gq */
+	{ "A1004",	&rs780e_platform },	/* 3A */
+	{ "A1201",	&rs780e_platform },	/* 2Gq */
 	/* Lemote Xinghuo 6100 (mini-ITX PC) */
-	{ "A1101",	&lemote3a_platform },	/* 3A */
+	{ "A1101",	&rs780e_platform },	/* 3A */
 	/* All-in-one PC */
-	{ "A1205",	&lemote3a_platform },	/* 2Gq */
+	{ "A1205",	&rs780e_platform },	/* 2Gq */
 #endif
 	{ NULL }
 };
@@ -220,7 +232,23 @@ loongson_identify(const char *version, int envtype)
 	switch (envtype) {
 #ifdef CPU_LOONGSON3
 	case PMON_ENVTYPE_EFI:
-		return &lemote3a_platform;
+		if (loongson_ver == 0x3a || loongson_ver == 0x3b) {
+			pcitag_t tag;
+			pcireg_t id;
+
+			htb_early_setup();
+
+			/* Determine platform by host bridge. */
+			tag = pci_make_tag_early(0, 0, 0);
+			id = pci_conf_read_early(tag, PCI_ID_REG);
+			switch (id) {
+			case PCI_ID_CODE(PCI_VENDOR_AMD,
+			    PCI_PRODUCT_AMD_RS780_HB):
+				return &rs780e_platform;
+			}
+		}
+		pmon_printf("Unable to figure out model!\n");
+		return NULL;
 #endif
 
 	default:
@@ -324,12 +352,35 @@ loongson_identify(const char *version, int envtype)
 int
 loongson_efi_setup(void)
 {
+	const struct pmon_env_cpu *cpuenv;
 	const struct pmon_env_mem *mem;
 	const struct pmon_env_mem_entry *entry;
 	paddr_t fp, lp;
-	uint32_t i, seg = 0;
+	uint32_t i, ncpus, seg = 0;
 
-	bootcpu_hwinfo.clock = pmon_get_env_cpu()->speed;
+	cpuenv = pmon_get_env_cpu();
+	bootcpu_hwinfo.clock = cpuenv->speed;
+
+	/*
+	 * Get available CPUs.
+	 */
+
+	ncpus = cpuenv->ncpus;
+	if (ncpus > LOONGSON_MAXCPUS)
+		ncpus = LOONGSON_MAXCPUS;
+
+	loongson_cpumask = (1u << ncpus) - 1;
+	loongson_cpumask &= ~(uint)cpuenv->reserved_cores;
+
+	ncpusfound = 0;
+	for (i = 0; i < ncpus; i++) {
+		if (ISSET(loongson_cpumask, 1u << i))
+			ncpusfound++;
+	}
+
+	/*
+	 * Get free memory segments.
+	 */
 
 	mem = pmon_get_env_mem();
 	physmem = 0;
@@ -376,6 +427,23 @@ loongson_envp_setup(void)
 	if (cpuspeed < 100 * 1000000)
 		cpuspeed = 797000000;  /* Reasonable default */
 	bootcpu_hwinfo.clock = cpuspeed;
+
+	/*
+	 * Guess the available CPUs.
+	 */
+
+	switch (loongson_ver) {
+#ifdef CPU_LOONGSON3
+	case 0x3a:
+		loongson_cpumask = 0x0f;
+		ncpusfound = 4;
+		break;
+	case 0x3b:
+		loongson_cpumask = 0xff;
+		ncpusfound = 8;
+		break;
+#endif
+	}
 
 	/*
 	 * Figure out memory information.
@@ -450,6 +518,13 @@ mips_init(uint64_t argc, uint64_t argv, uint64_t envp, uint64_t cv,
 	extern char exception[], e_exception[];
 	extern char *hw_vendor, *hw_prod;
 	extern void xtlb_miss;
+
+#ifdef MULTIPROCESSOR
+	/*
+	 * Set curcpu address on primary processor.
+	 */
+	setcurcpu(&cpu_info_primary);
+#endif
 
 	/*
 	 * Make sure we can access the extended address space.
@@ -527,6 +602,7 @@ mips_init(uint64_t argc, uint64_t argv, uint64_t envp, uint64_t cv,
 #endif
 #ifdef CPU_LOONGSON3
 		case 0x05:
+		case 0x08:
 			loongson_ver = 0x3a;
 			break;
 #endif
@@ -784,7 +860,7 @@ mips_init(uint64_t argc, uint64_t argv, uint64_t envp, uint64_t cv,
 #ifdef DDB
 	db_machine_init();
 	if (boothowto & RB_KDB)
-		Debugger();
+		db_enter();
 #endif
 
 	/*
@@ -903,7 +979,7 @@ cpu_startup()
 	/*
 	 * Good {morning,afternoon,evening,night}.
 	 */
-	printf(version);
+	printf("%s", version);
 	printf("real mem = %lu (%luMB)\n", ptoa((psize_t)physmem),
 	    ptoa((psize_t)physmem)/1024/1024);
 
@@ -942,20 +1018,26 @@ cpu_startup()
  * Machine dependent system variables.
  */
 int
-cpu_sysctl(name, namelen, oldp, oldlenp, newp, newlen, p)
-	int *name;
-	u_int namelen;
-	void *oldp;
-	size_t *oldlenp;
-	void *newp;
-	size_t newlen;
-	struct proc *p;
+cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
+    size_t newlen, struct proc *p)
 {
+	int val, error;
+
 	/* All sysctl names at this level are terminal. */
 	if (namelen != 1)
 		return ENOTDIR;		/* Overloaded */
 
 	switch (name[0]) {
+	case CPU_LIDACTION:
+		val = lid_action;
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &val);
+		if (!error) {
+			if (val < 0 || val > 2)
+				error = EINVAL;
+			else
+				lid_action = val;
+		}
+		return error;
 	default:
 		return EOPNOTSUPP;
 	}
@@ -1174,3 +1256,88 @@ pmoncnputc(dev_t dev, int c)
 	else
 		pmon_printf("%c", c);
 }
+
+#ifdef MULTIPROCESSOR
+
+void
+hw_cpu_hatch(struct cpu_info *ci)
+{
+	int s;
+
+	/*
+	 * Set curcpu address on this processor.
+	 */
+	setcurcpu(ci);
+
+	tlb_init(ci->ci_hw.tlbsize);
+	tlb_set_pid(0);
+
+	/*
+	 * Make sure we can access the extended address space.
+	 */
+	setsr(getsr() | SR_KX | SR_UX);
+
+	/*
+	 * Turn off bootstrap exception vectors.
+	 */
+	setsr(getsr() & ~SR_BOOT_EXC_VEC);
+
+	/*
+	 * Clear out the I and D caches.
+	 */
+	switch (loongson_ver) {
+#ifdef CPU_LOONGSON3
+	case 0x3a:
+	case 0x3b:
+		Loongson3_ConfigCache(ci);
+		Loongson3_SyncCache(ci);
+		break;
+#endif
+	default:
+		panic("%s: unhandled Loongson version %x\n", __func__,
+		    loongson_ver);
+	}
+
+	(*md_startclock)(ci);
+
+	mips64_ipi_init();
+
+	ncpus++;
+	cpuset_add(&cpus_running, ci);
+
+	spl0();
+	(void)updateimask(0);
+
+	SCHED_LOCK(s);
+	cpu_switchto(NULL, sched_chooseproc());
+}
+
+void
+hw_cpu_boot_secondary(struct cpu_info *ci)
+{
+	sys_platform->boot_secondary_cpu(ci);
+}
+
+int
+hw_ipi_intr_establish(int (*func)(void *), u_long cpuid)
+{
+	if (sys_platform->ipi_establish != NULL)
+		return sys_platform->ipi_establish(func, cpuid);
+	else
+		return 0;
+}
+
+void
+hw_ipi_intr_set(u_long cpuid)
+{
+	sys_platform->ipi_set(cpuid);
+}
+
+void
+hw_ipi_intr_clear(u_long cpuid)
+{
+	if (sys_platform->ipi_clear != NULL)
+		sys_platform->ipi_clear(cpuid);
+}
+
+#endif /* MULTIPROCESSOR */

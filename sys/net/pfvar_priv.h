@@ -1,4 +1,4 @@
-/*	$OpenBSD: pfvar_priv.h,v 1.1 2016/10/26 21:07:22 bluhm Exp $	*/
+/*	$OpenBSD: pfvar_priv.h,v 1.4 2017/08/06 13:16:11 mpi Exp $	*/
 
 /*
  * Copyright (c) 2001 Daniel Hartmeier
@@ -37,16 +37,9 @@
 
 #ifdef _KERNEL
 
-union pf_headers {
-	struct tcphdr           tcp;
-	struct udphdr           udp;
-	struct icmp             icmp;
-#ifdef INET6
-	struct icmp6_hdr        icmp6;
-	struct mld_hdr          mld;
-	struct nd_neighbor_solicit nd_ns;
-#endif /* INET6 */
-};
+#include <sys/rwlock.h>
+
+extern struct rwlock pf_lock;
 
 struct pf_pdesc {
 	struct {
@@ -56,15 +49,6 @@ struct pf_pdesc {
 		pid_t	 pid;
 	}		 lookup;
 	u_int64_t	 tot_len;	/* Make Mickey money */
-	union {
-		struct tcphdr		*tcp;
-		struct udphdr		*udp;
-		struct icmp		*icmp;
-#ifdef INET6
-		struct icmp6_hdr	*icmp6;
-#endif /* INET6 */
-		void			*any;
-	} hdr;
 
 	struct pf_addr	 nsaddr;	/* src address after NAT */
 	struct pf_addr	 ndaddr;	/* dst address after NAT */
@@ -102,8 +86,53 @@ struct pf_pdesc {
 	u_int8_t	 didx;		/* key index for destination */
 	u_int8_t	 destchg;	/* flag set when destination changed */
 	u_int8_t	 pflog;		/* flags for packet logging */
+	union {
+		struct tcphdr			tcp;
+		struct udphdr			udp;
+		struct icmp			icmp;
+#ifdef INET6
+		struct icmp6_hdr		icmp6;
+		struct mld_hdr			mld;
+		struct nd_neighbor_solicit	nd_ns;
+#endif /* INET6 */
+	} hdr;
 };
 
+extern struct task	pf_purge_task;
+extern struct timeout	pf_purge_to;
+
+#ifdef WITH_PF_LOCK
+extern struct rwlock	pf_lock;
+
+#define PF_LOCK()		do {			\
+		NET_ASSERT_LOCKED();			\
+		rw_enter_write(&pf_lock);		\
+	} while (0)
+
+#define PF_UNLOCK()		do {			\
+		PF_ASSERT_LOCKED();			\
+		rw_exit_write(&pf_lock);		\
+	} while (0)
+
+#define PF_ASSERT_LOCKED()	do {			\
+		if (rw_status(&pf_lock) != RW_WRITE)	\
+			splassert_fail(RW_WRITE,	\
+			    rw_status(&pf_lock),__func__);\
+	} while (0)
+
+#define PF_ASSERT_UNLOCKED()	do {			\
+		if (rw_status(&pf_lock) == RW_WRITE)	\
+			splassert_fail(0, rw_status(&pf_lock), __func__);\
+	} while (0)
+#else /* !WITH_PF_LOCK */
+#define PF_LOCK()		(void)(0)
+#define PF_UNLOCK()		(void)(0)
+#define PF_ASSERT_LOCKED()	(void)(0)
+#define PF_ASSERT_UNLOCKED()	(void)(0)
+#endif /* WITH_PF_LOCK */
+
+extern void			 pf_purge_timeout(void *);
+extern void			 pf_purge(void *);
 #endif /* _KERNEL */
 
 #endif /* _NET_PFVAR_PRIV_H_ */

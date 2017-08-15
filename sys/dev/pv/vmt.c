@@ -1,4 +1,4 @@
-/*	$OpenBSD: vmt.c,v 1.10 2016/10/04 09:59:44 kettenis Exp $ */
+/*	$OpenBSD: vmt.c,v 1.13 2017/06/04 05:04:24 jmatthew Exp $ */
 
 /*
  * Copyright (c) 2007 David Crawshaw <david@zentus.com>
@@ -23,7 +23,7 @@
 
 /*
  * Protocol reverse engineered by Ken Kato:
- * http://chitchat.at.infoseek.co.jp/vmware/backdoor.html
+ * https://sites.google.com/site/chitchatvmback/backdoor
  */
 
 #include <sys/param.h>
@@ -595,12 +595,7 @@ vmt_do_shutdown(struct vmt_softc *sc)
 {
 	vmt_tclo_state_change_success(sc, 1, VM_STATE_CHANGE_HALT);
 	vm_rpc_send_str(&sc->sc_tclo_rpc, VM_RPC_REPLY_OK);
-
-	suspend_randomness();
-
-	log(LOG_KERN | LOG_NOTICE,
-	    "Shutting down in response to request from VMware host\n");
-	prsignal(initprocess, SIGUSR2);
+	pvbus_shutdown(&sc->sc_dev);
 }
 
 void
@@ -608,12 +603,7 @@ vmt_do_reboot(struct vmt_softc *sc)
 {
 	vmt_tclo_state_change_success(sc, 1, VM_STATE_CHANGE_REBOOT);
 	vm_rpc_send_str(&sc->sc_tclo_rpc, VM_RPC_REPLY_OK);
-
-	suspend_randomness();
-
-	log(LOG_KERN | LOG_NOTICE,
-	    "Rebooting in response to request from VMware host\n");
-	prsignal(initprocess, SIGINT);
+	pvbus_reboot(&sc->sc_dev);
 }
 
 void

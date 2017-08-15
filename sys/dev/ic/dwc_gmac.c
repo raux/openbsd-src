@@ -1,4 +1,4 @@
-/*	$OpenBSD: dwc_gmac.c,v 1.3 2016/10/08 11:20:26 kettenis Exp $	*/
+/*	$OpenBSD: dwc_gmac.c,v 1.8 2017/06/29 17:36:16 deraadt Exp $	*/
 /* $NetBSD: dwc_gmac.c,v 1.34 2015/08/21 20:12:29 jmcneill Exp $ */
 
 /*-
@@ -39,8 +39,6 @@
  *
  *  http://www.synopsys.com/dw/ipdir.php?ds=dwc_ether_mac10_100_1000_unive
  */
-
-/*__KERNEL_RCSID(1, "$NetBSD: dwc_gmac.c,v 1.34 2015/08/21 20:12:29 jmcneill Exp $");*/
 
 /* #define	DWC_GMAC_DEBUG	1 */
 
@@ -173,13 +171,10 @@ dwc_gmac_attach(struct dwc_gmac_softc *sc, uint32_t mii_clk, int phyloc)
 		enaddr[5] = (machi >> 8) & 0x0ff;
 	}
 
-	/*
-	 * Init chip and do initial setup
-	 */
 	if (dwc_gmac_reset(sc) != 0)
 		return;	/* not much to cleanup, haven't attached yet */
-	dwc_gmac_write_hwaddr(sc, enaddr);
-	printf("%s: Ethernet address: %s\n", sc->sc_dev.dv_xname,
+
+	printf("%s: address: %s\n", sc->sc_dev.dv_xname,
 	    ether_sprintf(enaddr));
 	memcpy(sc->sc_ac.ac_enaddr, enaddr, ETHER_ADDR_LEN);
 
@@ -564,8 +559,7 @@ dwc_gmac_free_rx_ring(struct dwc_gmac_softc *sc, struct dwc_gmac_rx_ring *ring)
 			bus_dmamap_unload(sc->sc_dmat, data->rd_map);
 			bus_dmamap_destroy(sc->sc_dmat, data->rd_map);
 		}
-		if (data->rd_m != NULL)
-			m_freem(data->rd_m);
+		m_freem(data->rd_m);
 	}
 }
 
@@ -735,6 +729,9 @@ dwc_gmac_miibus_statchg(struct device *dev)
 	bus_space_write_4(sc->sc_bst, sc->sc_bsh,
 	    AWIN_GMAC_MAC_FLOWCTRL, flow);
 
+	if (sc->sc_statchg)
+		sc->sc_statchg(dev);
+
 #ifdef DWC_GMAC_DEBUG
 	printf("%s: setting MAC conf register: %08x\n",
 	    sc->sc_dev.dv_xname, conf);
@@ -761,8 +758,9 @@ dwc_gmac_init(struct ifnet *ifp)
 	    2 << GMAC_BUSMODE_PBL_SHIFT);
 
 	/*
-	 * Program promiscuous mode and multicast filters
+	 * Program address filters
 	 */
+	dwc_gmac_write_hwaddr(sc, sc->sc_ac.ac_enaddr);
 	dwc_gmac_iff(sc);
 
 	/*
@@ -808,8 +806,6 @@ dwc_gmac_start(struct ifnet *ifp)
 		}
 
 		ifq_deq_commit(&ifp->if_snd, m_head);
-
-		ifp->if_opackets++;
 
 #if NBPFILTER > 0
 		if (ifp->if_bpf)
@@ -1083,7 +1079,6 @@ dwc_gmac_tx_intr(struct dwc_gmac_softc *sc)
 		if (data->td_m == NULL)
 			continue;
 
-		ifp->if_opackets++;
 		nsegs = data->td_active->dm_nsegs;
 		bus_dmamap_sync(sc->sc_dmat, data->td_active, 0,
 		    data->td_active->dm_mapsize, BUS_DMASYNC_POSTWRITE);

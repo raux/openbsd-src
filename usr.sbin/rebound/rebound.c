@@ -1,4 +1,4 @@
-/* $OpenBSD: rebound.c,v 1.74 2016/10/08 06:33:59 tedu Exp $ */
+/* $OpenBSD: rebound.c,v 1.90 2017/08/12 00:24:13 tedu Exp $ */
 /*
  * Copyright (c) 2015 Ted Unangst <tedu@openbsd.org>
  *
@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <limits.h>
 #include <string.h>
+#include <ctype.h>
 #include <err.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -63,13 +64,15 @@ struct dnspacket {
 	uint16_t ancount;
 	uint16_t nscount;
 	uint16_t arcount;
+	char qname[];
 	/* ... */
 };
+#define NAMELEN 256
 
 /*
  * requests will point to cache entries until a response is received.
  * until then, the request owns the entry and must free it.
- * after it's on the list, the request must not free it.
+ * after the response is set, the request must not free it.
  */
 struct dnscache {
 	TAILQ_ENTRY(dnscache) fifo;
@@ -79,6 +82,7 @@ struct dnscache {
 	struct dnspacket *resp;
 	size_t resplen;
 	struct timespec ts;
+	struct timespec basetime;
 };
 static TAILQ_HEAD(, dnscache) cachefifo;
 static RB_HEAD(cachetree, dnscache) cachetree;
@@ -102,6 +106,8 @@ struct request {
 	uint16_t clientid;
 	uint16_t reqid;
 	struct dnscache *cacheent;
+	char origname[NAMELEN];
+	char newname[NAMELEN];
 };
 static TAILQ_HEAD(, request) reqfifo;
 
@@ -157,11 +163,126 @@ cachecmp(struct dnscache *c1, struct dnscache *c2)
 }
 RB_GENERATE_STATIC(cachetree, dnscache, cachenode, cachecmp)
 
+static void
+lowercase(unsigned char *s, size_t len)
+{
+	while (len--) {
+		*s = tolower(*s);
+		s++;
+	}
+}
+
+static void
+randomcase(unsigned char *s, size_t len)
+{
+	unsigned char bits[NAMELEN / 8], *b;
+	u_int i = 0;
+
+	arc4random_buf(bits, (len + 7) / 8);
+	b = bits;
+	while (len--) {
+		*s = (*b & (1 << i)) ? toupper(*s) : tolower(*s);
+		s++;
+		i++;
+		if (i == 8) {
+			b++;
+			i = 0;
+		}
+	}
+}
+
+static void
+freecacheent(struct dnscache *ent)
+{
+	cachecount -= 1;
+	RB_REMOVE(cachetree, &cachetree, ent);
+	TAILQ_REMOVE(&cachefifo, ent, fifo);
+	free(ent->req);
+	free(ent->resp);
+	free(ent);
+}
+
+/*
+ * names end with either a nul byte, or a two byte 0xc0 pointer
+ */
+static size_t
+dnamelen(const unsigned char *p, size_t len)
+{
+	size_t n = 0;
+
+	for (n = 0; n < len; n++) {
+		if (p[n] == 0)
+			return n + 1;
+		if ((p[n] & 0xc0) == 0xc0)
+			return n + 2;
+	}
+	return len + 1;
+}
+
+static int
+adjustttl(struct dnscache *ent)
+{
+	struct dnspacket *resp = ent->resp;
+	char *p = (char *)resp;
+	u_int rlen = ent->resplen;
+	u_int used = 0;
+	uint32_t ttl, cnt, i;
+	uint16_t len;
+	time_t diff;
+
+	diff = now.tv_sec - ent->basetime.tv_sec;
+	if (diff <= 0)
+		return 0;
+
+	/* checks are redundant; checked when cacheent is created */
+	/* skip past packet header */
+	used += sizeof(struct dnspacket);
+	if (used >= rlen)
+		return -1;
+	if (ntohs(resp->qdcount) != 1)
+		return -1;
+	/* skip past query name, type, and class */
+	used += dnamelen(p + used, rlen - used);
+	used += 2;
+	used += 2;
+	cnt = ntohs(resp->ancount);
+	for (i = 0; i < cnt; i++) {
+		if (used >= rlen)
+			return -1;
+		/* skip past answer name, type, and class */
+		used += dnamelen(p + used, rlen - used);
+		used += 2;
+		used += 2;
+		if (used + 4 >= rlen)
+			return -1;
+		memcpy(&ttl, p + used, 4);
+		ttl = ntohl(ttl);
+		/* expired */
+		if (diff >= ttl)
+			return -1;
+		ttl -= diff;
+		ttl = ntohl(ttl);
+		memcpy(p + used, &ttl, 4);
+		used += 4;
+		if (used + 2 >= rlen)
+			return -1;
+		memcpy(&len, p + used, 2);
+		used += 2;
+		used += ntohs(len);
+	}
+	ent->basetime.tv_sec += diff;
+	return 0;
+}
+
 static struct dnscache *
-cachelookup(struct dnspacket *dnsreq, size_t reqlen)
+cachelookup(struct dnspacket *dnsreq, size_t reqlen, size_t namelen)
 {
 	struct dnscache *hit, key;
+	unsigned char origname[NAMELEN];
 	uint16_t origid;
+
+	memcpy(origname, dnsreq->qname, namelen);
+	lowercase(dnsreq->qname, namelen);
 
 	origid = dnsreq->id;
 	dnsreq->id = 0;
@@ -169,9 +290,15 @@ cachelookup(struct dnspacket *dnsreq, size_t reqlen)
 	key.reqlen = reqlen;
 	key.req = dnsreq;
 	hit = RB_FIND(cachetree, &cachetree, &key);
-	if (hit)
-		cachehits += 1;
+	if (hit) {
+		if (adjustttl(hit) != 0) {
+			freecacheent(hit);
+			hit = NULL;
+		} else
+			cachehits += 1;
+	}
 
+	memcpy(dnsreq->qname, origname, namelen);
 	dnsreq->id = origid;
 	return hit;
 }
@@ -189,24 +316,13 @@ freerequest(struct request *req)
 		TAILQ_REMOVE(&reqfifo, req, fifo);
 		close(req->s);
 	}
-	if (req->client != -1)
+	if (req->tcp && req->client != -1)
 		close(req->client);
 	if ((ent = req->cacheent) && !ent->resp) {
 		free(ent->req);
 		free(ent);
 	}
 	free(req);
-}
-
-static void
-freecacheent(struct dnscache *ent)
-{
-	cachecount -= 1;
-	RB_REMOVE(cachetree, &cachetree, ent);
-	TAILQ_REMOVE(&cachefifo, ent, fifo);
-	free(ent->req);
-	free(ent->resp);
-	free(ent);
 }
 
 static void
@@ -228,8 +344,9 @@ newrequest(int ud, struct sockaddr *remoteaddr)
 	struct request *req;
 	uint8_t buf[65536];
 	struct dnspacket *dnsreq;
-	struct dnscache *hit;
+	struct dnscache *hit = NULL;
 	size_t r;
+	size_t namelen = 0;
 
 	dnsreq = (struct dnspacket *)buf;
 
@@ -237,10 +354,20 @@ newrequest(int ud, struct sockaddr *remoteaddr)
 	r = recvfrom(ud, buf, sizeof(buf), 0, &from.a, &fromlen);
 	if (r == 0 || r == -1 || r < sizeof(struct dnspacket))
 		return NULL;
+	if (ntohs(dnsreq->qdcount) == 1) {
+		/* some more checking */
+		namelen = dnamelen(dnsreq->qname, r - sizeof(struct dnspacket));
+		if (namelen > r - sizeof(struct dnspacket))
+			return NULL;
+		if (namelen > NAMELEN)
+			return NULL;
+		hit = cachelookup(dnsreq, r, namelen);
+	}
 
 	conntotal += 1;
-	if ((hit = cachelookup(dnsreq, r))) {
+	if (hit) {
 		hit->resp->id = dnsreq->id;
+		memcpy(hit->resp->qname, dnsreq->qname, namelen);
 		sendto(ud, hit->resp, hit->resplen, 0, &from.a, fromlen);
 		return NULL;
 	}
@@ -253,28 +380,34 @@ newrequest(int ud, struct sockaddr *remoteaddr)
 	req->ts.tv_sec += 30;
 	req->s = -1;
 
-	req->client = -1;
+	req->client = ud;
 	memcpy(&req->from, &from, fromlen);
 	req->fromlen = fromlen;
 
 	req->clientid = dnsreq->id;
 	req->reqid = randomid();
 	dnsreq->id = req->reqid;
+	if (ntohs(dnsreq->qdcount) == 1) {
+		memcpy(req->origname, dnsreq->qname, namelen);
+		randomcase(dnsreq->qname, namelen);
+		memcpy(req->newname, dnsreq->qname, namelen);
 
-	hit = calloc(1, sizeof(*hit));
-	if (hit) {
-		hit->req = malloc(r);
-		if (hit->req) {
-			memcpy(hit->req, dnsreq, r);
-			hit->reqlen = r;
-			hit->req->id = 0;
-		} else {
-			free(hit);
-			hit = NULL;
+		hit = calloc(1, sizeof(*hit));
+		if (hit) {
+			hit->req = malloc(r);
+			if (hit->req) {
+				memcpy(hit->req, dnsreq, r);
+				hit->reqlen = r;
+				hit->req->id = 0;
+				lowercase(hit->req->qname, namelen);
+			} else {
+				free(hit);
+				hit = NULL;
 
+			}
 		}
+		req->cacheent = hit;
 	}
-	req->cacheent = hit;
 
 	req->s = socket(remoteaddr->sa_family, SOCK_DGRAM, 0);
 	if (req->s == -1)
@@ -301,49 +434,49 @@ fail:
 }
 
 static uint32_t
-minttl(struct dnspacket *resp, size_t rlen)
+minttl(struct dnspacket *resp, u_int rlen)
 {
-	uint32_t minttl = UINT_MAX, ttl, cnt, i;
+	uint32_t minttl = -1, ttl, cnt, i;
 	uint16_t len;
 	char *p = (char *)resp;
-	char *end = p + rlen;
+	u_int used = 0;
 
 	/* skip past packet header */
-	p += sizeof(struct dnspacket);
-	if (p >= end)
+	used += sizeof(struct dnspacket);
+	if (used >= rlen)
 		return -1;
 	if (ntohs(resp->qdcount) != 1)
 		return -1;
 	/* skip past query name, type, and class */
-	p += strnlen(p, end - p);
-	p += 2;
-	p += 2;
+	used += dnamelen(p + used, rlen - used);
+	used += 2;
+	used += 2;
 	cnt = ntohs(resp->ancount);
 	for (i = 0; i < cnt; i++) {
-		if (p >= end)
+		if (used >= rlen)
 			return -1;
 		/* skip past answer name, type, and class */
-		p += strnlen(p, end - p);
-		p += 2;
-		p += 2;
-		if (p + 4 >= end)
+		used += dnamelen(p + used, rlen - used);
+		used += 2;
+		used += 2;
+		if (used + 4 >= rlen)
 			return -1;
-		memcpy(&ttl, p, 4);
-		p += 4;
-		if (p + 2 >= end)
+		memcpy(&ttl, p + used, 4);
+		used += 4;
+		if (used + 2 >= rlen)
 			return -1;
 		ttl = ntohl(ttl);
 		if (ttl < minttl)
 			minttl = ttl;
-		memcpy(&len, p, 2);
-		p += 2;
-		p += ntohs(len);
+		memcpy(&len, p + used, 2);
+		used += 2;
+		used += ntohs(len);
 	}
 	return minttl;
 }
 
 static void
-sendreply(int ud, struct request *req)
+sendreply(struct request *req)
 {
 	uint8_t buf[65536];
 	struct dnspacket *resp;
@@ -359,20 +492,33 @@ sendreply(int ud, struct request *req)
 	if (resp->id != req->reqid)
 		return;
 	resp->id = req->clientid;
-	sendto(ud, buf, r, 0, &req->from.a, req->fromlen);
+	if (ntohs(resp->qdcount) == 1) {
+		/* some more checking */
+		size_t namelen = dnamelen(resp->qname, r - sizeof(struct dnspacket));
+		if (namelen > r - sizeof(struct dnspacket))
+			return;
+		if (namelen > NAMELEN)
+			return;
+		if (memcmp(resp->qname, req->newname, namelen) != 0)
+			return;
+		memcpy(resp->qname, req->origname, namelen);
+	}
+	sendto(req->client, buf, r, 0, &req->from.a, req->fromlen);
 	if ((ent = req->cacheent)) {
+		/* check that the response is worth caching */
+		ttl = minttl(resp, r);
+		if (ttl == -1 || ttl == 0)
+			return;
 		/*
-		 * we do this first, because there's a potential race against
+		 * we do this next, because there's a potential race against
 		 * other requests made at the same time. if we lose, abort.
 		 * if anything else goes wrong, though, we need to reverse.
 		 */
 		if (RB_INSERT(cachetree, &cachetree, ent))
 			return;
-		ttl = minttl(resp, r);
-		if (ttl == -1)
-			ttl = 0;
 		ent->ts = now;
 		ent->ts.tv_sec += MINIMUM(ttl, 300);
+		ent->basetime = now;
 		ent->resp = malloc(r);
 		if (!ent->resp) {
 			RB_REMOVE(cachetree, &cachetree, ent);
@@ -499,33 +645,34 @@ readconfig(int conffd, union sockun *remoteaddr)
 	return rv;
 }
 
-static int
-launch(int conffd, int ud, int ld)
+static void
+workerinit(void)
 {
-	union sockun remoteaddr;
-	struct kevent ch[2], kev[4];
-	struct timespec ts, *timeout = NULL;
-	struct request *req;
-	struct dnscache *ent;
+	struct rlimit rlim;
 	struct passwd *pwd;
-	int i, r, af, kq;
-	pid_t parent, child;
 
-	parent = getpid();
-	if (!debug) {
-		if ((child = fork()))
-			return child;
-	}
+	if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
+		logerr("getrlimit: %s", strerror(errno));
+	rlim.rlim_cur = rlim.rlim_max;
+	if (setrlimit(RLIMIT_NOFILE, &rlim) == -1)
+		logerr("setrlimit: %s", strerror(errno));
+	connmax = rlim.rlim_cur - 10;
+	if (connmax > 512)
+		connmax = 512;
 
-	kq = kqueue();
+	cachemax = 10000; /* something big, but not huge */
+
+	TAILQ_INIT(&reqfifo);
+	TAILQ_INIT(&cachefifo);
+	RB_INIT(&cachetree);
 
 	if (!(pwd = getpwnam("_rebound")))
 		logerr("getpwnam failed");
 
 	if (chroot(pwd->pw_dir) == -1)
-		logerr("chroot failed (%d)", errno);
+		logerr("chroot: %s", strerror(errno));
 	if (chdir("/") == -1)
-		logerr("chdir failed (%d)", errno);
+		logerr("chdir: %s", strerror(errno));
 
 	setproctitle("worker");
 	if (setgroups(1, &pwd->pw_gid) ||
@@ -533,13 +680,31 @@ launch(int conffd, int ud, int ld)
 	    setresuid(pwd->pw_uid, pwd->pw_uid, pwd->pw_uid))
 		logerr("failed to privdrop");
 
-	/* would need pledge(proc) to do this below */
-	EV_SET(&kev[0], parent, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, NULL);
-	if (kevent(kq, kev, 1, NULL, 0, NULL) == -1)
-		logerr("kevent1: %d", errno);
-
 	if (pledge("stdio inet", NULL) == -1)
 		logerr("pledge failed");
+}
+
+static int
+workerloop(int conffd, int ud, int ld, int ud6, int ld6)
+{
+	union sockun remoteaddr;
+	struct kevent ch[2], kev[4];
+	struct timespec ts, *timeout = NULL;
+	struct request *req;
+	struct dnscache *ent;
+	int i, r, af, kq;
+
+	kq = kqueue();
+
+	if (!debug) {
+		pid_t parent = getppid();
+		/* would need pledge(proc) to do this below */
+		EV_SET(&kev[0], parent, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, NULL);
+		if (kevent(kq, kev, 1, NULL, 0, NULL) == -1)
+			logerr("kevent1: %d", errno);
+	}
+
+	workerinit();
 
 	af = readconfig(conffd, &remoteaddr);
 	if (af == -1)
@@ -547,10 +712,14 @@ launch(int conffd, int ud, int ld)
 
 	EV_SET(&kev[0], ud, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	EV_SET(&kev[1], ld, EVFILT_READ, EV_ADD, 0, 0, NULL);
-	EV_SET(&kev[2], SIGHUP, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
-	EV_SET(&kev[3], SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	EV_SET(&kev[2], ud6, EVFILT_READ, EV_ADD, 0, 0, NULL);
+	EV_SET(&kev[3], ld6, EVFILT_READ, EV_ADD, 0, 0, NULL);
 	if (kevent(kq, kev, 4, NULL, 0, NULL) == -1)
 		logerr("kevent4: %d", errno);
+	EV_SET(&kev[0], SIGHUP, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	EV_SET(&kev[1], SIGUSR1, EVFILT_SIGNAL, EV_ADD, 0, 0, NULL);
+	if (kevent(kq, kev, 2, NULL, 0, NULL) == -1)
+		logerr("kevent2: %d", errno);
 	logmsg(LOG_INFO, "worker process going to work");
 	while (1) {
 		r = kevent(kq, NULL, 0, kev, 4, timeout);
@@ -566,8 +735,10 @@ launch(int conffd, int ud, int ld)
 		}
 
 		for (i = 0; i < r; i++) {
-			if (kev[i].filter == EVFILT_SIGNAL) {
-				if (kev[i].ident == SIGHUP) {
+			struct kevent *ke = &kev[i];
+			switch (ke->filter) {
+			case EVFILT_SIGNAL:
+				if (ke->ident == SIGHUP) {
 					logmsg(LOG_INFO, "hupped, exiting");
 					exit(0);
 				} else {
@@ -578,11 +749,13 @@ launch(int conffd, int ud, int ld)
 					    "%d active, %llu hits",
 					    cachecount, cachehits);
 				}
-			} else if (kev[i].filter == EVFILT_PROC) {
+				break;
+			case EVFILT_PROC:
 				logmsg(LOG_INFO, "parent died");
 				exit(0);
-			} else if (kev[i].filter == EVFILT_WRITE) {
-				req = kev[i].udata;
+				break;
+			case EVFILT_WRITE:
+				req = ke->udata;
 				req = tcpphasetwo(req);
 				if (req) {
 					EV_SET(&ch[0], req->s, EVFILT_WRITE,
@@ -591,26 +764,31 @@ launch(int conffd, int ud, int ld)
 					    EV_ADD, 0, 0, req);
 					kevent(kq, ch, 2, NULL, 0, NULL);
 				}
-			} else if (kev[i].filter != EVFILT_READ) {
+				break;
+			case EVFILT_READ:
+				if (ke->ident == ud || ke->ident == ud6) {
+					if ((req = newrequest(ke->ident, &remoteaddr.a))) {
+						EV_SET(&ch[0], req->s, EVFILT_READ,
+						    EV_ADD, 0, 0, req);
+						kevent(kq, ch, 1, NULL, 0, NULL);
+					}
+				} else if (ke->ident == ld || ke->ident == ld6) {
+					if ((req = newtcprequest(ke->ident, &remoteaddr.a))) {
+						EV_SET(&ch[0], req->s,
+						    req->tcp == 1 ? EVFILT_WRITE :
+						    EVFILT_READ, EV_ADD, 0, 0, req);
+						kevent(kq, ch, 1, NULL, 0, NULL);
+					}
+				} else {
+					req = ke->udata;
+					if (req->tcp == 0)
+						sendreply(req);
+					freerequest(req);
+				}
+				break;
+			default:
 				logerr("don't know what happened");
-			} else if (kev[i].ident == ud) {
-				if ((req = newrequest(ud, &remoteaddr.a))) {
-					EV_SET(&ch[0], req->s, EVFILT_READ,
-					    EV_ADD, 0, 0, req);
-					kevent(kq, ch, 1, NULL, 0, NULL);
-				}
-			} else if (kev[i].ident == ld) {
-				if ((req = newtcprequest(ld, &remoteaddr.a))) {
-					EV_SET(&ch[0], req->s,
-					    req->tcp == 1 ? EVFILT_WRITE :
-					    EVFILT_READ, EV_ADD, 0, 0, req);
-					kevent(kq, ch, 1, NULL, 0, NULL);
-				}
-			} else {
-				req = kev[i].udata;
-				if (req->tcp == 0)
-					sendreply(ud, req);
-				freerequest(req);
+				break;
 			}
 		}
 
@@ -678,108 +856,35 @@ openconfig(const char *confname, int kq)
 	return conffd;
 }
 
-static void
-resetport(void)
+static pid_t
+reexec(int conffd, int ud, int ld, int ud6, int ld6)
 {
-	int dnsjacking[2] = { CTL_KERN, KERN_DNSJACKPORT };
-	int jackport = 0;
+	pid_t child;
 
-	sysctl(dnsjacking, 2, NULL, NULL, &jackport, sizeof(jackport));
+	if (conffd != 8 || ud != 3 || ld != 4 || ud6 != 5 || ld6 != 6)
+		logerr("can't re-exec, fds are wrong");
+
+	switch ((child = fork())) {
+	case -1:
+		logerr("failed to fork");
+		break;
+	case 0:
+		execl("/usr/sbin/rebound", "rebound", "-W", NULL);
+		logerr("re-exec failed");
+	default:
+		break;
+	}
+	return child;
 }
 
-static void __dead
-usage(void)
+static int
+monitorloop(int ud, int ld, int ud6, int ld6, const char *confname)
 {
-	fprintf(stderr, "usage: rebound [-d] [-c config]\n");
-	exit(1);
-}
-
-int
-main(int argc, char **argv)
-{
-	int dnsjacking[2] = { CTL_KERN, KERN_DNSJACKPORT };
-	int jackport = 54;
-	union sockun bindaddr;
-	int r, kq, ld, ud, ch, conffd = -1;
-	int one = 1;
 	pid_t child;
 	struct kevent kev;
-	struct rlimit rlim;
+	int r, kq;
+	int conffd = -1;
 	struct timespec ts, *timeout = NULL;
-	const char *confname = "/etc/resolv.conf";
-
-	while ((ch = getopt(argc, argv, "c:d")) != -1) {
-		switch (ch) {
-		case 'c':
-			confname = optarg;
-			break;
-		case 'd':
-			debug = 1;
-			break;
-		default:
-			usage();
-			break;
-		}
-	}
-	argv += optind;
-	argc -= optind;
-
-	if (argc)
-		usage();
-
-	if (getrlimit(RLIMIT_NOFILE, &rlim) == -1)
-		logerr("getrlimit: %s", strerror(errno));
-	rlim.rlim_cur = rlim.rlim_max;
-	if (setrlimit(RLIMIT_NOFILE, &rlim) == -1)
-		logerr("setrlimit: %s", strerror(errno));
-	connmax = rlim.rlim_cur - 10;
-	if (connmax > 512)
-		connmax = 512;
-
-	cachemax = 10000; /* something big, but not huge */
-
-	tzset();
-	openlog("rebound", LOG_PID | LOG_NDELAY, LOG_DAEMON);
-
-	TAILQ_INIT(&reqfifo);
-	TAILQ_INIT(&cachefifo);
-	RB_INIT(&cachetree);
-
-	memset(&bindaddr, 0, sizeof(bindaddr));
-	bindaddr.i.sin_len = sizeof(bindaddr.i);
-	bindaddr.i.sin_family = AF_INET;
-	bindaddr.i.sin_port = htons(jackport);
-	inet_aton("127.0.0.1", &bindaddr.i.sin_addr);
-
-	ud = socket(AF_INET, SOCK_DGRAM, 0);
-	if (ud == -1)
-		logerr("socket: %s", strerror(errno));
-	if (bind(ud, &bindaddr.a, bindaddr.a.sa_len) == -1)
-		logerr("bind: %s", strerror(errno));
-
-	ld = socket(AF_INET, SOCK_STREAM, 0);
-	if (ld == -1)
-		logerr("socket: %s", strerror(errno));
-	setsockopt(ld, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
-	if (bind(ld, &bindaddr.a, bindaddr.a.sa_len) == -1)
-		logerr("bind: %s", strerror(errno));
-	if (listen(ld, 10) == -1)
-		logerr("listen: %s", strerror(errno));
-
-	atexit(resetport);
-	sysctl(dnsjacking, 2, NULL, NULL, &jackport, sizeof(jackport));
-	
-	signal(SIGPIPE, SIG_IGN);
-	signal(SIGUSR1, SIG_IGN);
-
-	if (debug) {
-		conffd = openconfig(confname, -1);
-		return launch(conffd, ud, ld);
-	}
-
-	if (daemon(0, 0) == -1)
-		logerr("daemon: %s", strerror(errno));
-	daemonized = 1;
 
 	kq = kqueue();
 
@@ -797,9 +902,7 @@ main(int argc, char **argv)
 		if (conffd == -1)
 			conffd = openconfig(confname, kq);
 
-		child = launch(conffd, ud, ld);
-		if (child == -1)
-			logerr("failed to launch");
+		child = reexec(conffd, ud, ld, ud6, ld6);
 
 		/* monitor child */
 		EV_SET(&kev, child, EVFILT_PROC, EV_ADD, NOTE_EXIT, 0, NULL);
@@ -811,45 +914,173 @@ main(int argc, char **argv)
 			r = kevent(kq, NULL, 0, &kev, 1, timeout);
 			if (r == -1)
 				logerr("kevent failed (%d)", errno);
-
 			if (r == 0) {
 				/* timeout expired */
 				logerr("child died without HUP");
-			} else if (kev.filter == EVFILT_VNODE) {
+			}
+			switch (kev.filter) {
+			case EVFILT_VNODE:
 				/* config file changed */
 				logmsg(LOG_INFO, "config changed, reloading");
 				close(conffd);
 				conffd = -1;
 				sleep(1);
 				raise(SIGHUP);
-			} else if (kev.filter == EVFILT_SIGNAL &&
-			    kev.ident == SIGHUP) {
-				/* signaled. kill child. */
-				logmsg(LOG_INFO, "received HUP, restarting");
-				hupped = 1;
-				if (childdead)
-					break;
-				kill(child, SIGHUP);
-			} else if (kev.filter == EVFILT_SIGNAL &&
-			    kev.ident == SIGTERM) {
-				/* good bye */
-				logmsg(LOG_INFO, "received TERM, quitting");
-				kill(child, SIGTERM);
-				exit(0);
-			} else if (kev.filter == EVFILT_PROC) {
+				break;
+			case EVFILT_SIGNAL:
+				if (kev.ident == SIGHUP) {
+					/* signaled. kill child. */
+					logmsg(LOG_INFO, "received HUP, restarting");
+					hupped = 1;
+					if (childdead)
+						goto doublebreak;
+					kill(child, SIGHUP);
+				} else if (kev.ident == SIGTERM) {
+					/* good bye */
+					logmsg(LOG_INFO, "received TERM, quitting");
+					kill(child, SIGTERM);
+					exit(0);
+				}
+				break;
+			case EVFILT_PROC:
 				/* child died. wait for our own HUP. */
 				logmsg(LOG_INFO, "observed child exit");
 				childdead = 1;
 				if (hupped)
-					break;
+					goto doublebreak;
 				memset(&ts, 0, sizeof(ts));
 				ts.tv_sec = 1;
 				timeout = &ts;
-			} else {
+				break;
+			default:
 				logerr("don't know what happened");
+				break;
 			}
 		}
+doublebreak:
 		wait(NULL);
 	}
 	return 1;
+}
+
+static void
+resetport(void)
+{
+	int dnsjacking[2] = { CTL_KERN, KERN_DNSJACKPORT };
+	int jackport = 0;
+
+	sysctl(dnsjacking, 2, NULL, NULL, &jackport, sizeof(jackport));
+}
+
+static void __dead
+usage(void)
+{
+	fprintf(stderr, "usage: rebound [-d] [-c config] [-l address]\n");
+	exit(1);
+}
+
+int
+main(int argc, char **argv)
+{
+	int dnsjacking[2] = { CTL_KERN, KERN_DNSJACKPORT };
+	int jackport = 54;
+	union sockun bindaddr;
+	int ld, ld6, ud, ud6, ch;
+	int one = 1;
+	const char *confname = "/etc/resolv.conf";
+	const char *bindname = "127.0.0.1";
+
+	tzset();
+	openlog("rebound", LOG_PID | LOG_NDELAY, LOG_DAEMON);
+
+	signal(SIGPIPE, SIG_IGN);
+	signal(SIGUSR1, SIG_IGN);
+
+	while ((ch = getopt(argc, argv, "c:dl:W")) != -1) {
+		switch (ch) {
+		case 'c':
+			confname = optarg;
+			break;
+		case 'd':
+			debug = 1;
+			break;
+		case 'l':
+			bindname = optarg;
+			jackport = 0;
+			break;
+		case 'W':
+			daemonized = 1;
+			/* parent responsible for setting up fds */
+			return workerloop(8, 3, 4, 5, 6);
+		default:
+			usage();
+			break;
+		}
+	}
+	argv += optind;
+	argc -= optind;
+
+	if (argc)
+		usage();
+
+	/* make sure we consistently open fds */
+	closefrom(3);
+
+	memset(&bindaddr, 0, sizeof(bindaddr));
+	bindaddr.i.sin_len = sizeof(bindaddr.i);
+	bindaddr.i.sin_family = AF_INET;
+	bindaddr.i.sin_port = htons(jackport ? jackport : 53);
+	inet_aton(bindname, &bindaddr.i.sin_addr);
+
+	ud = socket(AF_INET, SOCK_DGRAM, 0);
+	if (ud == -1)
+		logerr("socket: %s", strerror(errno));
+	if (bind(ud, &bindaddr.a, bindaddr.a.sa_len) == -1)
+		logerr("bind: %s", strerror(errno));
+
+	ld = socket(AF_INET, SOCK_STREAM, 0);
+	if (ld == -1)
+		logerr("socket: %s", strerror(errno));
+	setsockopt(ld, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	if (bind(ld, &bindaddr.a, bindaddr.a.sa_len) == -1)
+		logerr("bind: %s", strerror(errno));
+	if (listen(ld, 10) == -1)
+		logerr("listen: %s", strerror(errno));
+
+	memset(&bindaddr, 0, sizeof(bindaddr));
+	bindaddr.i6.sin6_len = sizeof(bindaddr.i6);
+	bindaddr.i6.sin6_family = AF_INET6;
+	bindaddr.i6.sin6_port = htons(jackport ? jackport : 53);
+	bindaddr.i6.sin6_addr = in6addr_loopback;
+
+	ud6 = socket(AF_INET6, SOCK_DGRAM, 0);
+	if (ud6 == -1)
+		logerr("socket: %s", strerror(errno));
+	if (bind(ud6, &bindaddr.a, bindaddr.a.sa_len) == -1)
+		logerr("bind: %s", strerror(errno));
+
+	ld6 = socket(AF_INET6, SOCK_STREAM, 0);
+	if (ld6 == -1)
+		logerr("socket: %s", strerror(errno));
+	setsockopt(ld6, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+	if (bind(ld6, &bindaddr.a, bindaddr.a.sa_len) == -1)
+		logerr("bind: %s", strerror(errno));
+	if (listen(ld6, 10) == -1)
+		logerr("listen: %s", strerror(errno));
+
+	if (jackport) {
+		atexit(resetport);
+		sysctl(dnsjacking, 2, NULL, NULL, &jackport, sizeof(jackport));
+	}
+	
+	if (debug) {
+		int conffd = openconfig(confname, -1);
+		return workerloop(conffd, ud, ld, ud6, ld6);
+	}
+
+	if (daemon(0, 0) == -1)
+		logerr("daemon: %s", strerror(errno));
+	daemonized = 1;
+
+	return monitorloop(ud, ld, ud6, ld6, confname);
 }

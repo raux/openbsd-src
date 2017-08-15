@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_pppx.c,v 1.56 2016/09/15 02:00:18 dlg Exp $ */
+/*	$OpenBSD: if_pppx.c,v 1.63 2017/08/12 20:27:28 mpi Exp $ */
 
 /*
  * Copyright (c) 2010 Claudio Jeker <claudio@openbsd.org>
@@ -277,7 +277,6 @@ pppxread(dev_t dev, struct uio *uio, int ioflag)
 	struct pppx_dev *pxd = pppx_dev2pxd(dev);
 	struct mbuf *m, *m0;
 	int error = 0;
-	int s;
 	size_t len;
 
 	if (!pxd)
@@ -287,10 +286,11 @@ pppxread(dev_t dev, struct uio *uio, int ioflag)
 		if (ISSET(ioflag, IO_NDELAY))
 			return (EWOULDBLOCK);
 
-		s = splnet();
+		NET_LOCK();
 		pxd->pxd_waiting = 1;
-		error = tsleep(pxd, (PZERO + 1)|PCATCH, "pppxread", 0);
-		splx(s);
+		error = rwsleep(pxd, &netlock,
+		    (PZERO + 1)|PCATCH, "pppxread", 0);
+		NET_UNLOCK();
 		if (error != 0) {
 			return (error);
 		}
@@ -317,13 +317,9 @@ pppxwrite(dev_t dev, struct uio *uio, int ioflag)
 	struct pppx_if	*pxi;
 	uint32_t proto;
 	struct mbuf *top, **mp, *m;
-	struct niqueue *ifq;
 	int tlen;
 	int error = 0;
 	size_t mlen;
-#if NBPFILTER > 0
-	int s;
-#endif
 
 	if (uio->uio_resid < sizeof(*th) + sizeof(uint32_t) ||
 	    uio->uio_resid > MCLBYTES)
@@ -389,11 +385,8 @@ pppxwrite(dev_t dev, struct uio *uio, int ioflag)
 	top->m_pkthdr.ph_ifidx = pxi->pxi_if.if_index;
 
 #if NBPFILTER > 0
-	if (pxi->pxi_if.if_bpf) {
-		s = splnet();
+	if (pxi->pxi_if.if_bpf)
 		bpf_mtap(pxi->pxi_if.if_bpf, top, BPF_DIRECTION_IN);
-		splx(s);
-	}
 #endif
 	/* strip the tunnel header */
 	proto = ntohl(*(uint32_t *)(th + 1));
@@ -401,20 +394,17 @@ pppxwrite(dev_t dev, struct uio *uio, int ioflag)
 
 	switch (proto) {
 	case AF_INET:
-		ifq = &ipintrq;
+		ipv4_input(&pxi->pxi_if, top);
 		break;
 #ifdef INET6
 	case AF_INET6:
-		ifq = &ip6intrq;
+		ipv6_input(&pxi->pxi_if, top);
 		break;
 #endif
 	default:
 		m_freem(top);
 		return (EAFNOSUPPORT);
 	}
-
-	if (niq_enqueue(ifq, top) != 0)
-		return (ENOBUFS);
 
 	return (error);
 }
@@ -425,6 +415,7 @@ pppxioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 	struct pppx_dev *pxd = pppx_dev2pxd(dev);
 	int error = 0;
 
+	NET_LOCK();
 	switch (cmd) {
 	case PIPEXSMODE:
 		/*
@@ -468,12 +459,13 @@ pppxioctl(dev_t dev, u_long cmd, caddr_t addr, int flags, struct proc *p)
 	case FIONBIO:
 	case FIOASYNC:
 	case FIONREAD:
-		return (0);
+		break;
 
 	default:
 		error = ENOTTY;
 		break;
 	}
+	NET_UNLOCK();
 
 	return (error);
 }
@@ -660,7 +652,7 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	struct pipex_session *session;
 	struct pipex_hash_head *chain;
 	struct ifnet *ifp;
-	int unit, s, error = 0;
+	int unit, error = 0;
 	struct in_ifaddr *ia;
 	struct sockaddr_in ifaddr;
 #ifdef PIPEX_PPPOE
@@ -752,7 +744,7 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 		    MIN(req->pr_local_address.ss_len, sizeof(session->local)));
 #ifdef PIPEX_PPPOE
 	if (req->pr_protocol == PIPEX_PROTO_PPPOE)
-		session->proto.pppoe.over_ifp = over_ifp;
+		session->proto.pppoe.over_ifidx = over_ifp->if_index;
 #endif
 #ifdef PIPEX_PPTP
 	if (req->pr_protocol == PIPEX_PROTO_PPTP) {
@@ -845,8 +837,6 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	ifp->if_softc = pxi;
 	/* ifp->if_rdomain = req->pr_rdomain; */
 
-	s = splnet();
-
 	/* hook up pipex context */
 	chain = PIPEX_ID_HASHTABLE(session->session_id);
 	LIST_INSERT_HEAD(chain, session, id_chain);
@@ -855,7 +845,7 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	case PIPEX_PROTO_PPTP:
 	case PIPEX_PROTO_L2TP:
 		chain = PIPEX_PEER_ADDR_HASHTABLE(
-		    pipex_sockaddr_hash_key((struct sockaddr *)&session->peer));
+		    pipex_sockaddr_hash_key(&session->peer.sa));
 		LIST_INSERT_HEAD(chain, session, peer_addr_chain);
 		break;
 	}
@@ -864,7 +854,11 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	if (LIST_NEXT(session, session_list) == NULL)
 		pipex_timer_start();
 
+	/* XXXSMP breaks atomicity */
+	NET_UNLOCK();
 	if_attach(ifp);
+	NET_LOCK();
+
 	if_addgroup(ifp, "pppx");
 	if_alloc_sadl(ifp);
 
@@ -903,7 +897,7 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	ia->ia_ifa.ifa_dstaddr = sintosa(&ia->ia_dstaddr);
 	ia->ia_ifa.ifa_netmask = sintosa(&ia->ia_sockmask);
 	ia->ia_ifa.ifa_ifp = ifp;
-	
+
 	ia->ia_netmask = ia->ia_sockmask.sin_addr.s_addr;
 
 	error = in_ifinit(ifp, ia, &ifaddr, 1);
@@ -913,7 +907,6 @@ pppx_add_session(struct pppx_dev *pxd, struct pipex_session_req *req)
 	} else {
 		dohooks(ifp->if_addrhooks, 0);
 	}
-	splx(s);
 
 out:
 	rw_exit_write(&pppx_ifs_lk);
@@ -957,12 +950,11 @@ pppx_if_destroy(struct pppx_dev *pxd, struct pppx_if *pxi)
 {
 	struct ifnet *ifp;
 	struct pipex_session *session;
-	int s;
 
+	NET_ASSERT_LOCKED();
 	session = &pxi->pxi_session;
 	ifp = &pxi->pxi_if;
 
-	s = splnet();
 	LIST_REMOVE(session, id_chain);
 	LIST_REMOVE(session, session_list);
 	switch (session->protocol) {
@@ -976,9 +968,11 @@ pppx_if_destroy(struct pppx_dev *pxd, struct pppx_if *pxi)
 	/* if final session is destroyed, stop timer */
 	if (LIST_EMPTY(&pipex_session_list))
 		pipex_timer_stop();
-	splx(s);
 
+	/* XXXSMP breaks atomicity */
+	NET_UNLOCK();
 	if_detach(ifp);
+	NET_LOCK();
 
 	rw_enter_write(&pppx_ifs_lk);
 	if (RBT_REMOVE(pppx_ifs, &pppx_ifs, pxi) == NULL)
@@ -1023,9 +1017,8 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	struct pppx_hdr *th;
 	int error = 0;
 	int proto;
-#if NBPFILTER > 0
-	int s;
-#endif
+
+	NET_ASSERT_LOCKED();
 
 	if (!ISSET(ifp->if_flags, IFF_UP)) {
 		m_freem(m);
@@ -1034,11 +1027,8 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 	}
 
 #if NBPFILTER > 0
-	if (ifp->if_bpf) {
-		s = splnet();
+	if (ifp->if_bpf)
 		bpf_mtap_af(ifp->if_bpf, dst->sa_family, m, BPF_DIRECTION_OUT);
-		splx(s);
-	}
 #endif
 	if (pipex_enable) {
 		switch (dst->sa_family) {
@@ -1074,12 +1064,10 @@ pppx_if_output(struct ifnet *ifp, struct mbuf *m, struct sockaddr *dst,
 		rw_enter_read(&pppx_devs_lk);
 		error = mq_enqueue(&pxi->pxi_dev->pxd_svcq, m);
 		if (error == 0) {
-			s = splnet();
 			if (pxi->pxi_dev->pxd_waiting) {
 				wakeup((caddr_t)pxi->pxi_dev);
 				pxi->pxi_dev->pxd_waiting = 0;
 			}
-			splx(s);
 			selwakeup(&pxi->pxi_dev->pxd_rsel);
 		}
 		rw_exit_read(&pppx_devs_lk);

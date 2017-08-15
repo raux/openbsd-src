@@ -1,4 +1,4 @@
-/* $OpenBSD: packet.h,v 1.74 2016/10/11 21:47:45 djm Exp $ */
+/* $OpenBSD: packet.h,v 1.81 2017/05/31 08:09:45 markus Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -48,6 +48,9 @@ struct ssh {
 	char *local_ipaddr;
 	int local_port;
 
+	/* Optional preamble for log messages (e.g. username) */
+	char *log_preamble;
+
 	/* Dispatcher table */
 	dispatch_fn *dispatch[DISPATCH_MAX];
 	/* number of packets to ignore in the dispatcher */
@@ -59,6 +62,9 @@ struct ssh {
 	/* Lists for private and public keys */
 	TAILQ_HEAD(, key_entry) private_keys;
 	TAILQ_HEAD(, key_entry) public_keys;
+
+	/* Client/Server authentication context */
+	void *authctxt;
 
 	/* APP data */
 	void *app_data;
@@ -76,8 +82,9 @@ void     ssh_packet_set_nonblocking(struct ssh *);
 int      ssh_packet_get_connection_in(struct ssh *);
 int      ssh_packet_get_connection_out(struct ssh *);
 void     ssh_packet_close(struct ssh *);
-void	 ssh_packet_set_encryption_key(struct ssh *, const u_char *, u_int, int);
 void	 ssh_packet_set_input_hook(struct ssh *, ssh_packet_hook_fn *, void *);
+void	 ssh_packet_clear_keys(struct ssh *);
+void	 ssh_clear_newkeys(struct ssh *, int);
 
 int	 ssh_packet_is_rekeying(struct ssh *);
 void     ssh_packet_set_protocol_flags(struct ssh *, u_int);
@@ -90,17 +97,17 @@ void     ssh_packet_set_server(struct ssh *);
 void     ssh_packet_set_authenticated(struct ssh *);
 void     ssh_packet_set_mux(struct ssh *);
 int	 ssh_packet_get_mux(struct ssh *);
+int	 ssh_packet_set_log_preamble(struct ssh *, const char *, ...)
+    __attribute__((format(printf, 2, 3)));
 
 int	 ssh_packet_log_type(u_char);
 
-int	 ssh_packet_send1(struct ssh *);
 int	 ssh_packet_send2_wrapped(struct ssh *);
 int	 ssh_packet_send2(struct ssh *);
 
 int      ssh_packet_read(struct ssh *);
 int	 ssh_packet_read_expect(struct ssh *, u_int type);
 int      ssh_packet_read_poll(struct ssh *);
-int ssh_packet_read_poll1(struct ssh *, u_char *);
 int ssh_packet_read_poll2(struct ssh *, u_char *, u_int32_t *seqnr_p);
 int	 ssh_packet_process_incoming(struct ssh *, const char *buf, u_int len);
 int      ssh_packet_read_seqnr(struct ssh *, u_char *, u_int32_t *seqnr_p);
@@ -140,7 +147,7 @@ int	 ssh_remote_port(struct ssh *);
 const char *ssh_local_ipaddr(struct ssh *);
 int	 ssh_local_port(struct ssh *);
 
-void	 ssh_packet_set_rekey_limits(struct ssh *, u_int64_t, time_t);
+void	 ssh_packet_set_rekey_limits(struct ssh *, u_int64_t, u_int32_t);
 time_t	 ssh_packet_get_rekey_timeout(struct ssh *);
 
 void	*ssh_packet_get_input(struct ssh *);
@@ -163,7 +170,6 @@ int	sshpkt_put_string(struct ssh *ssh, const void *v, size_t len);
 int	sshpkt_put_cstring(struct ssh *ssh, const void *v);
 int	sshpkt_put_stringb(struct ssh *ssh, const struct sshbuf *v);
 int	sshpkt_put_ec(struct ssh *ssh, const EC_POINT *v, const EC_GROUP *g);
-int	sshpkt_put_bignum1(struct ssh *ssh, const BIGNUM *v);
 int	sshpkt_put_bignum2(struct ssh *ssh, const BIGNUM *v);
 
 int	sshpkt_get(struct ssh *ssh, void *valp, size_t len);
@@ -174,7 +180,6 @@ int	sshpkt_get_string(struct ssh *ssh, u_char **valp, size_t *lenp);
 int	sshpkt_get_string_direct(struct ssh *ssh, const u_char **valp, size_t *lenp);
 int	sshpkt_get_cstring(struct ssh *ssh, char **valp, size_t *lenp);
 int	sshpkt_get_ec(struct ssh *ssh, EC_POINT *v, const EC_GROUP *g);
-int	sshpkt_get_bignum1(struct ssh *ssh, BIGNUM *v);
 int	sshpkt_get_bignum2(struct ssh *ssh, BIGNUM *v);
 int	sshpkt_get_end(struct ssh *ssh);
 const u_char	*sshpkt_ptr(struct ssh *, size_t *lenp);

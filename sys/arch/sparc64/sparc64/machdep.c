@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.181 2016/10/09 11:25:40 tom Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.184 2017/05/25 03:19:39 dlg Exp $	*/
 /*	$NetBSD: machdep.c,v 1.108 2001/07/24 19:30:14 eeh Exp $ */
 
 /*-
@@ -367,14 +367,8 @@ struct sigframe {
  * machine dependent system variables.
  */
 int
-cpu_sysctl(name, namelen, oldp, oldlenp, newp, newlen, p)
-	int *name;
-	u_int namelen;
-	void *oldp;
-	size_t *oldlenp;
-	void *newp;
-	size_t newlen;
-	struct proc *p;
+cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
+    size_t newlen, struct proc *p)
 {
 	int oldval, ret;
 
@@ -502,7 +496,7 @@ sendsig(sig_t catcher, int sig, int mask, u_long code, int type,
 #ifdef DEBUG
 	if (sigdebug & SDB_FOLLOW) {
 		printf("sendsig: %s[%d] sig %d scp %p\n",
-		    p->p_comm, p->p_p->ps_pid, sig, &fp->sf_sc);
+		    p->p_p->ps_comm, p->p_p->ps_pid, sig, &fp->sf_sc);
 	}
 #endif
 
@@ -1333,7 +1327,7 @@ _bus_dmamap_sync(t, t0, map, offset, len, ops)
 	int ops;
 {
 	if (ops & (BUS_DMASYNC_PREWRITE | BUS_DMASYNC_POSTREAD))
-		membar(MemIssue);
+		__membar("#MemIssue");
 }
 
 /*

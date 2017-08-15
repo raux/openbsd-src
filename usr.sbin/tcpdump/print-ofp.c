@@ -1,4 +1,4 @@
-/*	$$	*/
+/*	$OpenBSD: print-ofp.c,v 1.11 2016/11/28 17:47:15 jca Exp $	*/
 
 /*
  * Copyright (c) 2016 Rafael Zalamena <rzalamena@openbsd.org>
@@ -21,11 +21,19 @@
 #include <endian.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <string.h>
+#include <pcap.h>
 
+#include "addrtoname.h"
+#include "extract.h"
 #include "interface.h"
+#include "ofp_map.h"
 
 /* Size of action header without the padding. */
 #define AH_UNPADDED	(offsetof(struct ofp_action_header, ah_pad))
+
+const char *
+	 print_map(unsigned int, struct constmap *);
 
 void	 ofp_print_hello(const u_char *, u_int, u_int);
 void	 ofp_print_featuresreply(const u_char *, u_int);
@@ -43,6 +51,7 @@ void	 ofp_print_oxm(struct ofp_ox_match *, const u_char *, u_int);
 
 void	 action_print_output(const u_char *, u_int);
 void	 action_print_group(const u_char *, u_int);
+void	 action_print_setqueue(const u_char *, u_int);
 void	 action_print_setmplsttl(const u_char *, u_int);
 void	 action_print_setnwttl(const u_char *, u_int);
 void	 action_print_push(const u_char *, u_int);
@@ -58,6 +67,36 @@ void	 instruction_print_meter(const char *, u_int);
 void	 instruction_print_experimenter(const char *, u_int);
 void	 ofp_print_instruction(struct ofp_instruction *, const char *, u_int);
 
+const char *
+print_map(unsigned int type, struct constmap *map)
+{
+	unsigned int		 i;
+#define CYCLE_BUFFERS		 8
+	static char		 buf[CYCLE_BUFFERS][32];
+	static int		 idx = 0;
+	const char		*name = NULL;
+
+	if (idx >= CYCLE_BUFFERS)
+		idx = 0;
+	memset(buf[idx], 0, sizeof(buf[idx]));
+
+	for (i = 0; map[i].cm_name != NULL; i++) {
+		if (map[i].cm_type == type) {
+			name = map[i].cm_name;
+			break;
+		}
+	}
+
+	if (name == NULL)
+		snprintf(buf[idx], sizeof(buf[idx]), "%u", type);
+	else if (vflag > 1)
+		snprintf(buf[idx], sizeof(buf[idx]), "%s[%u]", name, type);
+	else
+		strlcpy(buf[idx], name, sizeof(buf[idx]));
+
+	return (buf[idx++]);
+}
+
 void
 ofp_print_hello(const u_char *bp, u_int length, u_int ohlen)
 {
@@ -70,12 +109,10 @@ ofp_print_hello(const u_char *bp, u_int length, u_int ohlen)
 	bp += sizeof(struct ofp_header);
 	length -= sizeof(struct ofp_header);
 
-	printf(" HELLO");
-
 	/* Check for header truncation. */
 	if (ohlen > sizeof(struct ofp_header) &&
 	    length < sizeof(*he)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -93,7 +130,7 @@ ofp_print_hello(const u_char *bp, u_int length, u_int ohlen)
 	helen -= sizeof(*he);
 
 	switch (hetype) {
-	case OPF_HELLO_T_VERSION_BITMAP:
+	case OFP_HELLO_T_VERSION_BITMAP:
 		printf(" version bitmap <");
 		if (helen < sizeof(bmp)) {
 			printf("invalid header>");
@@ -102,7 +139,7 @@ ofp_print_hello(const u_char *bp, u_int length, u_int ohlen)
 
  next_bitmap:
 		if (length < sizeof(bmp)) {
-			printf("truncated>");
+			printf("[|OpenFlow]>");
 			break;
 		}
 
@@ -140,22 +177,22 @@ ofp_print_error(const u_char *bp, u_int length)
 {
 	struct ofp_error			*err;
 
-	printf(" ERROR");
 	if (length < sizeof(*err)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	err = (struct ofp_error *)bp;
-	printf(" <type %d code %d>", ntohs(err->err_type),
+	printf(" <type %s code %d>",
+	    print_map(ntohs(err->err_type), ofp_errtype_map),
 	    ntohs(err->err_code));
 
 	length -= min(sizeof(*err), length);
 	bp += sizeof(*err);
 	/* If there are still bytes left, print the optional error data. */
 	if (length) {
-		printf(" error data:");
-		ofp_print(bp);
+		printf(" error data");
+		ofp_print(bp, length);
 	}
 }
 
@@ -164,7 +201,6 @@ ofp_print_featuresreply(const u_char *bp, u_int length)
 {
 	struct ofp_switch_features		*swf;
 
-	printf(" FEATURES REPLY");
 	if (length < sizeof(*swf)) {
 		printf(" [trucanted]");
 		return;
@@ -172,10 +208,10 @@ ofp_print_featuresreply(const u_char *bp, u_int length)
 
 	swf = (struct ofp_switch_features *)bp;
 	printf(" <datapath_id %#016llx nbuffers %u ntables %d aux_id %d "
-	    "capabilities %#08x actions %#08x>",
+	    "capabilities %#08x>",
 	    be64toh(swf->swf_datapath_id), ntohl(swf->swf_nbuffers),
 	    swf->swf_ntables, swf->swf_aux_id,
-	    ntohl(swf->swf_capabilities), ntohl(swf->swf_actions));
+	    ntohl(swf->swf_capabilities));
 }
 
 void
@@ -183,15 +219,16 @@ ofp_print_setconfig(const u_char *bp, u_int length)
 {
 	struct ofp_switch_config		*cfg;
 
-	printf(" SET CONFIG");
 	if (length < sizeof(*cfg)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	cfg = (struct ofp_switch_config *)bp;
-	printf(" <flags %#04x miss_send_len %d>",
-	    ntohs(cfg->cfg_flags), ntohs(cfg->cfg_miss_send_len));
+	printf(" <flags %#04x miss_send_len %s>",
+	    ntohs(cfg->cfg_flags),
+	    print_map(ntohs(cfg->cfg_miss_send_len),
+	    ofp_controller_maxlen_map));
 }
 
 void
@@ -203,20 +240,22 @@ ofp_print_packetin(const u_char *bp, u_int length)
 	int				 haspacket = 0;
 	const u_char			*pktptr;
 
-	printf(" PACKET-IN");
 	if (length < sizeof(*pin)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	pin = (struct ofp_packet_in *)bp;
 	omtype = ntohs(pin->pin_match.om_type);
 	omlen = ntohs(pin->pin_match.om_length);
-	printf(" <buffer_id %u total_len %d reason %d table_id %d "
-	    "cookie %#016llx match type %d length %d>",
-	    ntohl(pin->pin_buffer_id), ntohs(pin->pin_total_len),
-	    pin->pin_reason, pin->pin_table_id, be64toh(pin->pin_cookie),
-	    omtype, omlen);
+	printf(" <buffer_id %s total_len %d reason %s table_id %s "
+	    "cookie %#016llx match type %s length %d>",
+	    print_map(ntohl(pin->pin_buffer_id), ofp_pktout_map),
+	    ntohs(pin->pin_total_len),
+	    print_map(pin->pin_reason, ofp_pktin_reason_map),
+	    print_map(pin->pin_table_id, ofp_table_id_map),
+	    be64toh(pin->pin_cookie),
+	    print_map(omtype, ofp_match_map), omlen);
 
 	if (pin->pin_buffer_id == OFP_PKTOUT_NO_BUFFER)
 		haspacket = 1;
@@ -239,7 +278,7 @@ ofp_print_packetin(const u_char *bp, u_int length)
 
  parse_next_oxm:
 	if (length < sizeof(*oxm)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -247,7 +286,7 @@ ofp_print_packetin(const u_char *bp, u_int length)
 	bp += sizeof(*oxm);
 	length -= sizeof(*oxm);
 	if (length < oxm->oxm_length) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -286,23 +325,24 @@ ofp_print_flowremoved(const u_char *bp, u_int length)
 	struct ofp_ox_match			*oxm;
 	int					 omtype, omlen;
 
-	printf(" FLOW REMOVED");
 	if (length < sizeof(*fr)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	fr = (struct ofp_flow_removed *)bp;
 	omtype = ntohs(fr->fr_match.om_type);
 	omlen = ntohs(fr->fr_match.om_length);
-	printf(" <cookie %#016llx priority %d reason %d table_id %d "
+	printf(" <cookie %#016llx priority %d reason %s table_id %s "
 	    "duration sec %u nsec %u timeout idle %d hard %d "
-	    "packet count %llu byte count %llu match type %d length %d>",
-	    be64toh(fr->fr_cookie), ntohs(fr->fr_priority), fr->fr_reason,
-	    fr->fr_table_id, ntohl(fr->fr_duration_sec),
-	    ntohl(fr->fr_duration_nsec), ntohs(fr->fr_idle_timeout),
-	    ntohs(fr->fr_hard_timeout), be64toh(fr->fr_packet_count),
-	    be64toh(fr->fr_byte_count), omtype, omlen);
+	    "packet count %llu byte count %llu match type %s length %d>",
+	    be64toh(fr->fr_cookie), ntohs(fr->fr_priority),
+	    print_map(fr->fr_reason, ofp_flowrem_reason_map),
+	    print_map(fr->fr_table_id, ofp_table_id_map),
+	    ntohl(fr->fr_duration_sec), ntohl(fr->fr_duration_nsec),
+	    ntohs(fr->fr_idle_timeout), ntohs(fr->fr_hard_timeout),
+	    be64toh(fr->fr_packet_count), be64toh(fr->fr_byte_count),
+	    print_map(omtype, ofp_match_map), omlen);
 
 	/* We only support OXM. */
 	if (omtype != OFP_MATCH_OXM)
@@ -317,7 +357,7 @@ ofp_print_flowremoved(const u_char *bp, u_int length)
 
  parse_next_oxm:
 	if (length < sizeof(*oxm)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -325,7 +365,7 @@ ofp_print_flowremoved(const u_char *bp, u_int length)
 	bp += sizeof(*oxm);
 	length -= sizeof(*oxm);
 	if (length < oxm->oxm_length) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -347,16 +387,16 @@ ofp_print_packetout(const u_char *bp, u_int length)
 	int					 actionslen, haspacket = 0;
 	int					 ahlen;
 
-	printf(" PACKET-OUT");
 	if (length < sizeof(*pout)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	pout = (struct ofp_packet_out *)bp;
 	actionslen = ntohs(pout->pout_actions_len);
-	printf(" <buffer_id %u in_port %u actions_len %d>",
-	    ntohl(pout->pout_buffer_id), ntohl(pout->pout_in_port),
+	printf(" <buffer_id %s in_port %s actions_len %d>",
+	    print_map(ntohl(pout->pout_buffer_id), ofp_pktout_map),
+	    print_map(ntohl(pout->pout_in_port), ofp_port_map),
 	    actionslen);
 
 	if (pout->pout_buffer_id == OFP_PKTOUT_NO_BUFFER)
@@ -372,7 +412,7 @@ ofp_print_packetout(const u_char *bp, u_int length)
 
  parse_next_action:
 	if (length < sizeof(*ah)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -382,7 +422,7 @@ ofp_print_packetout(const u_char *bp, u_int length)
 	actionslen -= AH_UNPADDED;
 	ahlen = ntohs(ah->ah_len) - AH_UNPADDED;
 	if (length < ahlen) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -418,23 +458,27 @@ ofp_print_flowmod(const u_char *bp, u_int length)
 	int					 omtype, omlen, ilen;
 	int					 instructionslen, padsize;
 
-	printf(" FLOW-MOD");
 	if (length < sizeof(*fm)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	fm = (struct ofp_flow_mod *)bp;
 	omtype = ntohs(fm->fm_match.om_type);
 	omlen = ntohs(fm->fm_match.om_length);
-	printf(" <cookie %llu cookie_mask %#016llx table_id %d command %d "
-	    "timeout idle %d hard %d priority %d buffer_id %u out_port %u "
-	    "out_group %u flags %#04x match type %d length %d>",
+	printf(" <cookie %llu cookie_mask %#016llx table_id %s command %s "
+	    "timeout idle %d hard %d priority %d buffer_id %s out_port %s "
+	    "out_group %s flags %#04x match type %s length %d>",
 	    be64toh(fm->fm_cookie), be64toh(fm->fm_cookie_mask),
-	    fm->fm_table_id, fm->fm_command, ntohs(fm->fm_idle_timeout),
-	    ntohs(fm->fm_hard_timeout), fm->fm_priority,
-	    ntohl(fm->fm_buffer_id), ntohl(fm->fm_out_port),
-	    ntohl(fm->fm_out_group), ntohs(fm->fm_flags), omtype, omlen);
+	    print_map(fm->fm_table_id, ofp_table_id_map),
+	    print_map(fm->fm_command, ofp_flowcmd_map),
+	    ntohs(fm->fm_idle_timeout), ntohs(fm->fm_hard_timeout),
+	    fm->fm_priority,
+	    print_map(ntohl(fm->fm_buffer_id), ofp_pktout_map),
+	    print_map(ntohl(fm->fm_out_port), ofp_port_map),
+	    print_map(ntohl(fm->fm_out_group), ofp_group_id_map),
+	    ntohs(fm->fm_flags),
+	    print_map(omtype, ofp_match_map), omlen);
 
 	bp += sizeof(*fm);
 	length -= sizeof(*fm);
@@ -456,7 +500,7 @@ ofp_print_flowmod(const u_char *bp, u_int length)
 
  parse_next_oxm:
 	if (length < sizeof(*oxm)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -464,7 +508,7 @@ ofp_print_flowmod(const u_char *bp, u_int length)
 	bp += sizeof(*oxm);
 	length -= sizeof(*oxm);
 	if (length < oxm->oxm_length) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -484,7 +528,7 @@ ofp_print_flowmod(const u_char *bp, u_int length)
 
 parse_next_instruction:
 	if (length < sizeof(*i)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -494,7 +538,7 @@ parse_next_instruction:
 	instructionslen -= sizeof(*i);
 	ilen = ntohs(i->i_len) - sizeof(*i);
 	if (length < ilen) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -508,22 +552,59 @@ parse_next_instruction:
 }
 
 void
-ofp_print(const u_char *bp)
+ofp_if_print(u_char *user, const struct pcap_pkthdr *h, const u_char *p)
 {
-	struct ofp_header			*oh;
-	unsigned int				 ohlen;
-	u_int					 length;
+	struct dlt_openflow_hdr	 of;
+	unsigned int		 length;
 
-	length = snapend - bp;
+	ts_print(&h->ts);
+
+	packetp = p;
+	snapend = p + h->caplen;
+	length = snapend - p;
+
+	TCHECK2(*p, sizeof(of));
+	memcpy(&of, p, sizeof(of));
+
+	if (ntohl(of.of_direction) == DLT_OPENFLOW_TO_SWITCH)
+		printf("controller -> %s", device);
+	else
+		printf("%s -> controller", device);
+	if (eflag)
+		printf(", datapath %#016llx", be64toh(of.of_datapath_id));
+
+	ofp_print(p + sizeof(of), length - sizeof(of));
+	goto out;
+
+ trunc:
+	printf("[|OpenFlow]");
+
+ out:
+	if (xflag)
+		default_print(p, (u_int)h->len);
+	putchar('\n');
+}
+
+void
+ofp_print(const u_char *bp, u_int length)
+{
+	struct ofp_header	*oh;
+	unsigned int		 ohlen, snaplen;
+
+	/* The captured data might be smaller than indicated */
+	snaplen = snapend - bp;
+	length = min(snaplen, length);
 	if (length < sizeof(*oh)) {
-		printf(" OpenFlow(truncated)");
+		printf("[|OpenFlow]");
 		return;
 	}
 
 	oh = (struct ofp_header *)bp;
 	ohlen = ntohs(oh->oh_length);
-	printf(" OpenFlow(ver %#02x type %d len %d xid %u)",
-	    oh->oh_version, oh->oh_type, ohlen, ntohl(oh->oh_xid));
+
+	printf(": OpenFlow %s type %u length %u xid %u",
+	    print_map(oh->oh_version, ofp_v_map),
+	    oh->oh_type, ntohs(oh->oh_length), ntohl(oh->oh_xid));
 
 	switch (oh->oh_version) {
 	case OFP_V_1_3:
@@ -533,6 +614,8 @@ ofp_print(const u_char *bp)
 		return;
 	}
 
+	printf(": %s", print_map(oh->oh_type, ofp_t_map));
+
 	switch (oh->oh_type) {
 	case OFP_T_HELLO:
 		ofp_print_hello(bp, length, ohlen);
@@ -541,13 +624,9 @@ ofp_print(const u_char *bp)
 		ofp_print_error(bp, length);
 		break;
 	case OFP_T_ECHO_REQUEST:
-		printf(" ECHO REQUEST");
-		break;
 	case OFP_T_ECHO_REPLY:
-		printf(" ECHO REPLY");
 		break;
 	case OFP_T_FEATURES_REQUEST:
-		printf(" FEATURES REQUEST");
 		break;
 	case OFP_T_FEATURES_REPLY:
 		ofp_print_featuresreply(bp, length);
@@ -576,7 +655,7 @@ oxm_print_byte(const u_char *bp, u_int length, int hasmask, int hex)
 	uint8_t		*b;
 
 	if (length < sizeof(*b)) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
@@ -590,7 +669,7 @@ oxm_print_byte(const u_char *bp, u_int length, int hasmask, int hex)
 		bp += sizeof(*b);
 		length -= sizeof(*b);
 		printf(" mask ");
-		oxm_print_word(bp, length, 0, 1);
+		oxm_print_byte(bp, length, 0, 1);
 	}
 }
 
@@ -600,7 +679,7 @@ oxm_print_halfword(const u_char *bp, u_int length, int hasmask, int hex)
 	uint16_t	*h;
 
 	if (length < sizeof(*h)) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
@@ -614,7 +693,7 @@ oxm_print_halfword(const u_char *bp, u_int length, int hasmask, int hex)
 		bp += sizeof(*h);
 		length -= sizeof(*h);
 		printf(" mask ");
-		oxm_print_word(bp, length, 0, 1);
+		oxm_print_halfword(bp, length, 0, 1);
 	}
 }
 
@@ -624,7 +703,7 @@ oxm_print_word(const u_char *bp, u_int length, int hasmask, int hex)
 	uint32_t	*w;
 
 	if (length < sizeof(*w)) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
@@ -648,7 +727,7 @@ oxm_print_quad(const u_char *bp, u_int length, int hasmask, int hex)
 	uint64_t	*q;
 
 	if (length < sizeof(*q)) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
@@ -669,23 +748,12 @@ oxm_print_quad(const u_char *bp, u_int length, int hasmask, int hex)
 void
 oxm_print_ether(const u_char *bp, u_int length, int hasmask)
 {
-	uint8_t		*ptr;
-	int		 i;
-	char		 hex[8];
-
 	if (length < ETHER_HDR_LEN) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
-	ptr = (uint8_t *)bp;
-	for (i = 0; i < ETHER_ADDR_LEN; i++) {
-		if (i)
-			printf(":");
-
-		snprintf(hex, sizeof(hex), "%02x", ptr[i]);
-		printf("%s", hex);
-	}
+	printf("%s", etheraddr_string(bp));
 
 	if (hasmask) {
 		bp += ETHER_ADDR_LEN;
@@ -703,7 +771,7 @@ oxm_print_data(const u_char *bp, u_int length, int hasmask, size_t datalen)
 	char		 hex[8];
 
 	if (length < datalen) {
-		printf("[truncated]");
+		printf("[|OpenFlow]");
 		return;
 	}
 
@@ -731,8 +799,9 @@ ofp_print_oxm(struct ofp_ox_match *oxm, const u_char *bp, u_int length)
 	field = OFP_OXM_GET_FIELD(oxm);
 	mask = OFP_OXM_GET_HASMASK(oxm);
 	len = oxm->oxm_length;
-	printf(" OXM <class %d field %d hasmask %d length %d",
-	    class, field, mask, len);
+	printf(" oxm <class %s field %s hasmask %d length %d",
+	    print_map(class, ofp_oxm_c_map),
+	    print_map(field, ofp_xm_t_map), mask, len);
 
 	switch (class) {
 	case OFP_OXM_C_OPENFLOW_BASIC:
@@ -779,7 +848,7 @@ ofp_print_oxm(struct ofp_ox_match *oxm, const u_char *bp, u_int length)
 		 * the presence of the VLAN.
 		 */
 		if (length < sizeof(*vlan)) {
-			printf("[truncated]");
+			printf("[|OpenFlow]");
 			break;
 		}
 
@@ -849,13 +918,14 @@ action_print_output(const u_char *bp, u_int length)
 	struct ofp_action_output		*ao;
 
 	if (length < (sizeof(*ao) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	ao = (struct ofp_action_output *)(bp - AH_UNPADDED);
-	printf(" port %u max_len %d",
-	    ntohl(ao->ao_port), ntohs(ao->ao_max_len));
+	printf(" port %s max_len %s",
+	    print_map(ntohl(ao->ao_port), ofp_port_map),
+	    print_map(ntohs(ao->ao_max_len), ofp_controller_maxlen_map));
 }
 
 void
@@ -864,12 +934,27 @@ action_print_group(const u_char *bp, u_int length)
 	struct ofp_action_group		*ag;
 
 	if (length < (sizeof(*ag) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
 	ag = (struct ofp_action_group *)(bp - AH_UNPADDED);
-	printf(" group_id %u", ntohl(ag->ag_group_id));
+	printf(" group_id %s",
+	    print_map(ntohl(ag->ag_group_id), ofp_group_id_map));
+}
+
+void
+action_print_setqueue(const u_char *bp, u_int length)
+{
+	struct ofp_action_set_queue	*asq;
+
+	if (length < (sizeof(*asq) - AH_UNPADDED)) {
+		printf(" [|OpenFlow]");
+		return;
+	}
+
+	asq = (struct ofp_action_set_queue *)(bp - AH_UNPADDED);
+	printf(" queue_id %u", ntohl(asq->asq_queue_id));
 }
 
 void
@@ -878,7 +963,7 @@ action_print_setmplsttl(const u_char *bp, u_int length)
 	struct ofp_action_mpls_ttl	*amt;
 
 	if (length < (sizeof(*amt) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -892,7 +977,7 @@ action_print_setnwttl(const u_char *bp, u_int length)
 	struct ofp_action_nw_ttl	*ant;
 
 	if (length < (sizeof(*ant) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -906,7 +991,7 @@ action_print_push(const u_char *bp, u_int length)
 	struct ofp_action_push		*ap;
 
 	if (length < (sizeof(*ap) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -920,7 +1005,7 @@ action_print_popmpls(const u_char *bp, u_int length)
 	struct ofp_action_pop_mpls	*apm;
 
 	if (length < (sizeof(*apm) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -936,7 +1021,7 @@ action_print_setfield(const u_char *bp, u_int length)
 	int				 omlen;
 
 	if (length < (sizeof(*asf) - AH_UNPADDED)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -947,7 +1032,7 @@ action_print_setfield(const u_char *bp, u_int length)
 
  parse_next_oxm:
 	if (length < sizeof(*oxm)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -955,7 +1040,7 @@ action_print_setfield(const u_char *bp, u_int length)
 	bp += sizeof(*oxm);
 	length -= sizeof(*oxm);
 	if (length < oxm->oxm_length) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -974,7 +1059,8 @@ ofp_print_action(struct ofp_action_header *ah, const u_char *bp, u_int length)
 	int			ahtype;
 
 	ahtype = ntohs(ah->ah_type);
-	printf(" ACTION <type %d length %d", ahtype, ntohs(ah->ah_len));
+	printf(" action <type %s length %d",
+	    print_map(ahtype, ofp_action_map), ntohs(ah->ah_len));
 
 	switch (ahtype) {
 	case OFP_ACTION_OUTPUT:
@@ -986,7 +1072,7 @@ ofp_print_action(struct ofp_action_header *ah, const u_char *bp, u_int length)
 		break;
 
 	case OFP_ACTION_SET_QUEUE:
-		/* TODO missing struct in ofp.h header. */
+		action_print_setqueue(bp, length);
 		break;
 
 	case OFP_ACTION_SET_MPLS_TTL:
@@ -1031,7 +1117,7 @@ instruction_print_gototable(const char *bp, u_int length)
 	struct ofp_instruction_goto_table	*igt;
 
 	if (length < (sizeof(*igt) - sizeof(struct ofp_instruction))) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1046,7 +1132,7 @@ instruction_print_meta(const char *bp, u_int length)
 	struct ofp_instruction_write_metadata	*iwm;
 
 	if (length < (sizeof(*iwm) - sizeof(struct ofp_instruction))) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1065,7 +1151,7 @@ instruction_print_actions(const char *bp, u_int length)
 	unsigned int				 ahlen;
 
 	if (length < (sizeof(*ia) - sizeof(struct ofp_instruction))) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1081,7 +1167,7 @@ instruction_print_actions(const char *bp, u_int length)
 
 parse_next_action:
 	if (length < sizeof(*ah)) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1091,7 +1177,7 @@ parse_next_action:
 	actionslen -= AH_UNPADDED;
 	ahlen = ntohs(ah->ah_len) - AH_UNPADDED;
 	if (length < ahlen) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1110,7 +1196,7 @@ instruction_print_meter(const char *bp, u_int length)
 	struct ofp_instruction_meter		*im;
 
 	if (length < (sizeof(*im) - sizeof(struct ofp_instruction))) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1125,7 +1211,7 @@ instruction_print_experimenter(const char *bp, u_int length)
 	struct ofp_instruction_experimenter		*ie;
 
 	if (length < (sizeof(*ie) - sizeof(struct ofp_instruction))) {
-		printf(" [truncated]");
+		printf(" [|OpenFlow]");
 		return;
 	}
 
@@ -1140,7 +1226,8 @@ ofp_print_instruction(struct ofp_instruction *i, const char *bp, u_int length)
 	int			itype;
 
 	itype = ntohs(i->i_type);
-	printf(" INSTRUCTION <type %d length %d", itype, ntohs(i->i_len));
+	printf(" instruction <type %s length %d",
+	    print_map(itype, ofp_instruction_t_map), ntohs(i->i_len));
 
 	switch (itype) {
 	case OFP_INSTRUCTION_T_GOTO_TABLE:

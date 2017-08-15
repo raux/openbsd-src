@@ -1,4 +1,4 @@
-/*	$OpenBSD: ipsec_output.c,v 1.64 2016/10/11 22:08:01 mikeb Exp $ */
+/*	$OpenBSD: ipsec_output.c,v 1.68 2017/05/18 10:56:45 bluhm Exp $ */
 /*
  * The author of this code is Angelos D. Keromytis (angelos@cis.upenn.edu)
  *
@@ -42,7 +42,7 @@
 #endif
 
 #include <netinet/udp.h>
-#include <netinet/ip_ipsp.h>
+#include <netinet/ip_ipip.h>
 #include <netinet/ip_ah.h>
 #include <netinet/ip_esp.h>
 #include <netinet/ip_ipcomp.h>
@@ -466,7 +466,7 @@ ipsp_process_done(struct mbuf *m, struct tdb *tdb)
 	}
 
 	tdbi = (struct tdb_ident *)(mtag + 1);
-	bcopy(&tdb->tdb_dst, &tdbi->dst, sizeof(union sockaddr_union));
+	tdbi->dst = tdb->tdb_dst;
 	tdbi->proto = tdb->tdb_sproto;
 	tdbi->spi = tdb->tdb_spi;
 	tdbi->rdomain = tdb->tdb_rdomain;
@@ -567,9 +567,8 @@ ipsec_adjust_mtu(struct mbuf *m, u_int32_t mtu)
 	struct tdb *tdbp;
 	struct m_tag *mtag;
 	ssize_t adjust;
-	int s;
 
-	s = splsoftnet();
+	NET_ASSERT_LOCKED();
 
 	for (mtag = m_tag_find(m, PACKET_TAG_IPSEC_OUT_DONE, NULL); mtag;
 	     mtag = m_tag_find(m, PACKET_TAG_IPSEC_OUT_DONE, mtag)) {
@@ -590,6 +589,4 @@ ipsec_adjust_mtu(struct mbuf *m, u_int32_t mtu)
 		    ntohl(tdbp->tdb_spi), tdbp->tdb_mtu,
 		    adjust, m));
 	}
-
-	splx(s);
 }

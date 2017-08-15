@@ -1,4 +1,4 @@
-/*	$OpenBSD: ntpd.c,v 1.111 2016/09/26 17:17:01 rzalamena Exp $ */
+/*	$OpenBSD: ntpd.c,v 1.113 2017/01/09 14:49:22 reyk Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -118,9 +118,6 @@ main(int argc, char *argv[])
 	u_int			 pfd_elms = 0, new_cnt;
 	struct constraint	*cstr;
 	struct passwd		*pw;
-	const char		*pw_dir;
-	uid_t			pw_uid;
-	gid_t			pw_gid;
 	void			*newp;
 	int			argc0 = argc;
 	char			**argv0 = argv;
@@ -206,17 +203,13 @@ main(int argc, char *argv[])
 		fatalx("%s: process '%s' failed", __func__, pname);
 	}
 
-	pw_dir = strdup(pw->pw_dir);
-	pw_uid = pw->pw_uid;
-	pw_gid = pw->pw_gid;
-
 	if (setpriority(PRIO_PROCESS, 0, -20) == -1)
 		warn("can't set priority");
 
 	reset_adjtime();
 	if (!lconf.settime) {
 		log_init(lconf.debug, LOG_DAEMON);
-		log_verbose(lconf.verbose);
+		log_setverbose(lconf.verbose);
 		if (!lconf.debug)
 			if (daemon(1, 0))
 				fatal("daemon");
@@ -291,7 +284,7 @@ main(int argc, char *argv[])
 			lconf.settime = 0;
 			timeout = INFTIM;
 			log_init(lconf.debug, LOG_DAEMON);
-			log_verbose(lconf.verbose);
+			log_setverbose(lconf.verbose);
 			log_warnx("no reply received in time, skipping initial "
 			    "time setting");
 			if (!lconf.debug)
@@ -391,7 +384,7 @@ dispatch_imsg(struct ntpd_conf *lconf, int argc, char **argv)
 			if (!lconf->settime)
 				break;
 			log_init(lconf->debug, LOG_DAEMON);
-			log_verbose(lconf->verbose);
+			log_setverbose(lconf->verbose);
 			memcpy(&d, imsg.data, sizeof(d));
 			ntpd_settime(d);
 			/* daemonize now */

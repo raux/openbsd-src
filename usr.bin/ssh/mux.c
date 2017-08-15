@@ -1,4 +1,4 @@
-/* $OpenBSD: mux.c,v 1.63 2016/10/19 23:21:56 dtucker Exp $ */
+/* $OpenBSD: mux.c,v 1.65 2017/06/09 06:47:13 djm Exp $ */
 /*
  * Copyright (c) 2002-2008 Damien Miller <djm@openbsd.org>
  *
@@ -1551,31 +1551,38 @@ mux_client_hello_exchange(int fd)
 {
 	Buffer m;
 	u_int type, ver;
+	int ret = -1;
 
 	buffer_init(&m);
 	buffer_put_int(&m, MUX_MSG_HELLO);
 	buffer_put_int(&m, SSHMUX_VER);
 	/* no extensions */
 
-	if (mux_client_write_packet(fd, &m) != 0)
-		fatal("%s: write packet: %s", __func__, strerror(errno));
+	if (mux_client_write_packet(fd, &m) != 0) {
+		debug("%s: write packet: %s", __func__, strerror(errno));
+		goto out;
+	}
 
 	buffer_clear(&m);
 
 	/* Read their HELLO */
 	if (mux_client_read_packet(fd, &m) != 0) {
-		buffer_free(&m);
-		return -1;
+		debug("%s: read packet failed", __func__);
+		goto out;
 	}
 
 	type = buffer_get_int(&m);
-	if (type != MUX_MSG_HELLO)
-		fatal("%s: expected HELLO (%u) received %u",
+	if (type != MUX_MSG_HELLO) {
+		error("%s: expected HELLO (%u) received %u",
 		    __func__, MUX_MSG_HELLO, type);
+		goto out;
+	}
 	ver = buffer_get_int(&m);
-	if (ver != SSHMUX_VER)
-		fatal("Unsupported multiplexing protocol version %d "
+	if (ver != SSHMUX_VER) {
+		error("Unsupported multiplexing protocol version %d "
 		    "(expected %d)", ver, SSHMUX_VER);
+		goto out;
+	}
 	debug2("%s: master version %u", __func__, ver);
 	/* No extensions are presently defined */
 	while (buffer_len(&m) > 0) {
@@ -1586,8 +1593,11 @@ mux_client_hello_exchange(int fd)
 		free(name);
 		free(value);
 	}
+	/* success */
+	ret = 0;
+ out:
 	buffer_free(&m);
-	return 0;
+	return ret;
 }
 
 static u_int
@@ -2163,8 +2173,6 @@ muxclient(const char *path)
 
 	memset(&addr, '\0', sizeof(addr));
 	addr.sun_family = AF_UNIX;
-	addr.sun_len = offsetof(struct sockaddr_un, sun_path) +
-	    strlen(path) + 1;
 
 	if (strlcpy(addr.sun_path, path,
 	    sizeof(addr.sun_path)) >= sizeof(addr.sun_path))
@@ -2174,7 +2182,7 @@ muxclient(const char *path)
 	if ((sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0)
 		fatal("%s socket(): %s", __func__, strerror(errno));
 
-	if (connect(sock, (struct sockaddr *)&addr, addr.sun_len) == -1) {
+	if (connect(sock, (struct sockaddr *)&addr, sizeof(addr)) == -1) {
 		switch (muxclient_command) {
 		case SSHMUX_COMMAND_OPEN:
 		case SSHMUX_COMMAND_STDIO_FWD:

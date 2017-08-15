@@ -1,4 +1,4 @@
-/*	$OpenBSD: util.c,v 1.4 2016/09/30 11:57:57 reyk Exp $	*/
+/*	$OpenBSD: util.c,v 1.6 2017/01/09 14:49:22 reyk Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -36,9 +36,6 @@
 #include <event.h>
 
 #include "switchd.h"
-
-extern int debug;
-extern int verbose;
 
 void
 socket_set_blockmode(int fd, enum blockmodes bm)
@@ -90,6 +87,24 @@ socket_getport(struct sockaddr_storage *ss)
 
 	/* NOTREACHED */
 	return (0);
+}
+
+int
+socket_setport(struct sockaddr_storage *ss, in_port_t port)
+{
+	switch (ss->ss_family) {
+	case AF_INET:
+		((struct sockaddr_in *)ss)->sin_port = ntohs(port);
+		return (0);
+	case AF_INET6:
+		((struct sockaddr_in6 *)ss)->sin6_port = ntohs(port);
+		return (0);
+	default:
+		return (-1);
+	}
+
+	/* NOTREACHED */
+	return (-1);
 }
 
 int
@@ -295,7 +310,7 @@ print_debug(const char *emsg, ...)
 {
 	va_list	 ap;
 
-	if (debug && verbose > 2) {
+	if (log_getverbose() > 2) {
 		va_start(ap, emsg);
 		vfprintf(stderr, emsg, ap);
 		va_end(ap);
@@ -307,7 +322,7 @@ print_verbose(const char *emsg, ...)
 {
 	va_list	 ap;
 
-	if (verbose) {
+	if (log_getverbose()) {
 		va_start(ap, emsg);
 		vfprintf(stderr, emsg, ap);
 		va_end(ap);
@@ -318,9 +333,8 @@ void
 print_hex(uint8_t *buf, off_t offset, size_t length)
 {
 	unsigned int	 i;
-	extern int	 verbose;
 
-	if (verbose < 3 || !length)
+	if (log_getverbose() < 3 || !length)
 		return;
 
 	for (i = 0; i < length; i++) {

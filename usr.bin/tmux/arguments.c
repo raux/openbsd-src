@@ -1,4 +1,4 @@
-/* $OpenBSD: arguments.c,v 1.15 2016/10/11 13:21:59 nicm Exp $ */
+/* $OpenBSD: arguments.c,v 1.19 2017/05/30 21:44:59 nicm Exp $ */
 
 /*
  * Copyright (c) 2010 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -18,10 +18,10 @@
 
 #include <sys/types.h>
 
-#include <getopt.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <vis.h>
 
 #include "tmux.h"
 
@@ -35,7 +35,6 @@ struct args_entry {
 	RB_ENTRY(args_entry)	 entry;
 };
 
-static void			 args_set(struct args *, u_char, const char *);
 static struct args_entry	*args_find(struct args *, u_char);
 
 static int	args_cmp(struct args_entry *, struct args_entry *);
@@ -130,9 +129,10 @@ char *
 args_print(struct args *args)
 {
 	size_t		 	 len;
-	char			*buf;
-	int			 i;
+	char			*buf, *escaped;
+	int			 i, flags;
 	struct args_entry	*entry;
+	static const char	 quoted[] = " #\"';$";
 
 	len = 1;
 	buf = xcalloc(1, len);
@@ -156,20 +156,32 @@ args_print(struct args *args)
 			args_print_add(&buf, &len, " -%c ", entry->flag);
 		else
 			args_print_add(&buf, &len, "-%c ", entry->flag);
-		if (strchr(entry->value, ' ') != NULL)
-			args_print_add(&buf, &len, "\"%s\"", entry->value);
+
+		flags = VIS_OCTAL|VIS_TAB|VIS_NL;
+		if (entry->value[strcspn(entry->value, quoted)] != '\0')
+			flags |= VIS_DQ;
+		utf8_stravis(&escaped, entry->value, flags);
+		if (flags & VIS_DQ)
+			args_print_add(&buf, &len, "\"%s\"", escaped);
 		else
-			args_print_add(&buf, &len, "%s", entry->value);
+			args_print_add(&buf, &len, "%s", escaped);
+		free(escaped);
 	}
 
 	/* And finally the argument vector. */
 	for (i = 0; i < args->argc; i++) {
 		if (*buf != '\0')
 			args_print_add(&buf, &len, " ");
-		if (strchr(args->argv[i], ' ') != NULL)
-			args_print_add(&buf, &len, "\"%s\"", args->argv[i]);
+
+		flags = VIS_OCTAL|VIS_TAB|VIS_NL;
+		if (args->argv[i][strcspn(args->argv[i], quoted)] != '\0')
+			flags |= VIS_DQ;
+		utf8_stravis(&escaped, args->argv[i], flags);
+		if (flags & VIS_DQ)
+			args_print_add(&buf, &len, "\"%s\"", escaped);
 		else
-			args_print_add(&buf, &len, "%s", args->argv[i]);
+			args_print_add(&buf, &len, "%s", escaped);
+		free(escaped);
 	}
 
 	return (buf);
@@ -183,7 +195,7 @@ args_has(struct args *args, u_char ch)
 }
 
 /* Set argument value in the arguments tree. */
-static void
+void
 args_set(struct args *args, u_char ch, const char *value)
 {
 	struct args_entry	*entry;

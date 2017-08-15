@@ -1,4 +1,4 @@
-/*	$OpenBSD: rnd.c,v 1.190 2016/10/18 13:40:59 deraadt Exp $	*/
+/*	$OpenBSD: rnd.c,v 1.193 2017/07/30 21:40:14 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2011 Theo de Raadt.
@@ -142,7 +142,7 @@
  * (See M. Matsumoto & Y. Kurita, 1992.  Twisted GFSR generators.  ACM
  * Transactions on Modeling and Computer Simulation 2(3):179-194.
  * Also see M. Matsumoto & Y. Kurita, 1994.  Twisted GFSR generators
- * II.  ACM Transactions on Mdeling and Computer Simulation 4:254-266)
+ * II.  ACM Transactions on Modeling and Computer Simulation 4:254-266)
  *
  * Thanks to Colin Plumb for suggesting this.
  *
@@ -186,7 +186,7 @@
  * distance from evenly spaced; except for the last tap, which is 1 to
  * get the twisting happening as fast as possible.
  *
- * The reultant polynomial is:
+ * The resultant polynomial is:
  *   2^POOLWORDS + 2^POOL_TAP1 + 2^POOL_TAP2 + 2^POOL_TAP3 + 2^POOL_TAP4 + 1
  */
 #define POOLWORDS	2048
@@ -225,7 +225,7 @@ u_int rnd_event_idx;
 struct timeout rnd_timeout;
 
 static u_int32_t entropy_pool[POOLWORDS];
-static const u_int32_t entropy_pool0[POOLWORDS] __attribute__((section(".openbsd.randomdata")));
+u_int32_t entropy_pool0[POOLWORDS] __attribute__((section(".openbsd.randomdata")));
 u_int	entropy_add_ptr;
 u_char	entropy_input_rotate;
 
@@ -262,7 +262,7 @@ static __inline struct rand_event *
 rnd_put(void)
 {
 	u_int idx = rnd_event_idx++;
-	
+
 	/* allow wrapping. caller will use xor. */
 	idx = idx % QEVLEN;
 
@@ -363,7 +363,7 @@ add_entropy_words(const u_int32_t *buf, u_int n)
 }
 
 /*
- * Pulls entropy out of the queue and throws merges it into the pool
+ * Pulls entropy out of the queue and merges it into the pool
  * with the CRC.
  */
 /* ARGSUSED */
@@ -442,7 +442,7 @@ struct task arc4_task = TASK_INITIALIZER(arc4_init, NULL);
 static chacha_ctx rs;		/* chacha context for random keystream */
 /* keystream blocks (also chacha seed from boot) */
 static u_char rs_buf[RSBUFSZ];
-static const u_char rs_buf0[RSBUFSZ] __attribute__((section(".openbsd.randomdata")));
+u_char rs_buf0[RSBUFSZ] __attribute__((section(".openbsd.randomdata")));
 static size_t rs_have;		/* valid bytes at end of rs_buf */
 static size_t rs_count;		/* bytes till reseed */
 
@@ -631,7 +631,6 @@ _rs_random_u32(u_int32_t *val)
 	memcpy(val, rs_buf + RSBUFSZ - rs_have, sizeof(*val));
 	memset(rs_buf + RSBUFSZ - rs_have, 0, sizeof(*val));
 	rs_have -= sizeof(*val);
-	return;
 }
 
 /* Return one word of randomness from a ChaCha20 generator */

@@ -1,4 +1,4 @@
-/*	$OpenBSD: server_fcgi.c,v 1.73 2016/10/07 07:37:29 patrick Exp $	*/
+/*	$OpenBSD: server_fcgi.c,v 1.75 2017/07/31 08:02:49 ians Exp $	*/
 
 /*
  * Copyright (c) 2014 Florian Obser <florian@openbsd.org>
@@ -120,7 +120,6 @@ server_fcgi(struct httpd *env, struct client *clt)
 			goto fail;
 	} else {
 		struct sockaddr_un	 sun;
-		size_t			 len;
 
 		if ((fd = socket(AF_UNIX,
 		    SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1)
@@ -128,13 +127,11 @@ server_fcgi(struct httpd *env, struct client *clt)
 
 		memset(&sun, 0, sizeof(sun));
 		sun.sun_family = AF_UNIX;
-		len = strlcpy(sun.sun_path,
-		    srv_conf->socket, sizeof(sun.sun_path));
-		if (len >= sizeof(sun.sun_path)) {
-			errstr = "socket path too long";
+		if (strlcpy(sun.sun_path, srv_conf->socket,
+		    sizeof(sun.sun_path)) >= sizeof(sun.sun_path)) {
+			errstr = "socket path to long";
 			goto fail;
 		}
-		sun.sun_len = len;
 
 		if (connect(fd, (struct sockaddr *)&sun, sizeof(sun)) == -1)
 			goto fail;
@@ -664,8 +661,10 @@ server_fcgi_header(struct client *clt, unsigned int code)
 	}
 
 	/* Date header is mandatory and should be added as late as possible */
-	if (server_http_time(time(NULL), tmbuf, sizeof(tmbuf)) <= 0 ||
-	    kv_add(&resp->http_headers, "Date", tmbuf) == NULL)
+	key.kv_key = "Date";
+	if ((kv = kv_find(&resp->http_headers, &key)) == NULL &&
+	    (server_http_time(time(NULL), tmbuf, sizeof(tmbuf)) <= 0 ||
+	    kv_add(&resp->http_headers, "Date", tmbuf) == NULL))
 		return (-1);
 
 	/* Write initial header (fcgi might append more) */

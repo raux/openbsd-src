@@ -1,4 +1,4 @@
-/*	$OpenBSD: update.c,v 1.174 2016/10/15 22:20:17 millert Exp $	*/
+/*	$OpenBSD: update.c,v 1.176 2017/06/01 08:08:24 joris Exp $	*/
 /*
  * Copyright (c) 2006 Joris Vink <joris@openbsd.org>
  *
@@ -142,7 +142,7 @@ cvs_update(int argc, char **argv)
 	argc -= optind;
 	argv += optind;
 
-	if (current_cvsroot->cr_method == CVS_METHOD_LOCAL) {
+	if (cvsroot_is_local()) {
 		cr.enterdir = cvs_update_enterdir;
 		cr.leavedir = prune_dirs ? cvs_update_leavedir : NULL;
 		cr.fileproc = cvs_update_local;
@@ -180,7 +180,7 @@ cvs_update(int argc, char **argv)
 	else
 		cvs_file_run(1, &arg, &cr);
 
-	if (current_cvsroot->cr_method != CVS_METHOD_LOCAL) {
+	if (cvsroot_is_remote()) {
 		cvs_client_send_files(argv, argc);
 		cvs_client_senddir(".");
 		cvs_client_send_request("update");
@@ -337,8 +337,6 @@ cvs_update_local(struct cvs_file *cf)
 	flags = 0;
 	if (cvs_specified_tag != NULL)
 		tag = cvs_specified_tag;
-	else if (cf->file_ent != NULL && cf->file_ent->ce_tag != NULL)
-		tag = cf->file_ent->ce_tag;
 	else
 		tag = cvs_directory_tag;
 

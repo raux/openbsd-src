@@ -1,4 +1,4 @@
-/*	$OpenBSD: cd9660_write.c,v 1.3 2016/10/16 20:26:56 natano Exp $	*/
+/*	$OpenBSD: cd9660_write.c,v 1.8 2017/04/06 19:09:45 natano Exp $	*/
 /*	$NetBSD: cd9660_write.c,v 1.17 2013/10/19 17:16:37 christos Exp $	*/
 
 /*
@@ -60,13 +60,8 @@ cd9660_write_image(iso9660_disk *diskStructure, const char* image)
 	int status;
 	char buf[CD9660_SECTOR_SIZE];
 
-	if ((fd = fopen(image, "w+")) == NULL) {
-		err(EXIT_FAILURE, "%s: Can't open `%s' for writing", __func__,
-		    image);
-	}
-
-	if (diskStructure->verbose_level > 0)
-		printf("Writing image\n");
+	if ((fd = fopen(image, "w+")) == NULL)
+		err(1, "%s: Can't open `%s' for writing", __func__, image);
 
 	if (diskStructure->has_generic_bootimage) {
 		status = cd9660_copy_file(diskStructure, fd, 0,
@@ -86,9 +81,6 @@ cd9660_write_image(iso9660_disk *diskStructure, const char* image)
 		goto cleanup_bad_image;
 	}
 
-	if (diskStructure->verbose_level > 0)
-		printf("Volume descriptors written\n");
-
 	/*
 	 * Write the path tables: there are actually four, but right
 	 * now we are only concearned with two.
@@ -98,9 +90,6 @@ cd9660_write_image(iso9660_disk *diskStructure, const char* image)
 		warnx("%s: Error writing path tables to image", __func__);
 		goto cleanup_bad_image;
 	}
-
-	if (diskStructure->verbose_level > 0)
-		printf("Path tables written\n");
 
 	/* Write the directories and files */
 	status = cd9660_write_file(diskStructure, fd, diskStructure->rootNode);
@@ -118,20 +107,12 @@ cd9660_write_image(iso9660_disk *diskStructure, const char* image)
 	cd9660_write_filedata(diskStructure, fd,
 	    diskStructure->totalSectors - 1, buf, 1);
 
-	if (diskStructure->verbose_level > 0)
-		printf("Files written\n");
 	fclose(fd);
-
-	if (diskStructure->verbose_level > 0)
-		printf("Image closed\n");
 	return 1;
 
 cleanup_bad_image:
 	fclose(fd);
-	if (!diskStructure->keep_bad_images)
-		unlink(image);
-	if (diskStructure->verbose_level > 0)
-		printf("Bad image cleaned up\n");
+	unlink(image);
 	return 0;
 }
 
@@ -253,19 +234,14 @@ cd9660_write_path_tables(iso9660_disk *diskStructure, FILE *fd)
 static int
 cd9660_write_file(iso9660_disk *diskStructure, FILE *fd, cd9660node *writenode)
 {
-	char *buf;
 	char *temp_file_name;
-	int ret;
 	off_t working_sector;
 	int cur_sector_offset;
 	iso_directory_record_cd9660 temp_record;
 	cd9660node *temp;
-	int rv = 0;
 
 	/* Todo : clean up variables */
 
-	temp_file_name = ecalloc(CD9660MAXPATH + 1, 1);
-	buf = emalloc(diskStructure->sectorSize);
 	if ((writenode->level != 0) &&
 	    !(writenode->node->type & S_IFDIR)) {
 		fsinode *inode = writenode->node->inode;
@@ -277,12 +253,12 @@ cd9660_write_file(iso9660_disk *diskStructure, FILE *fd, cd9660node *writenode)
 			INODE_WARNX(("%s: writing inode %d blocks at %" PRIu32,
 			    __func__, (int)inode->st.st_ino, inode->ino));
 			inode->flags |= FI_WRITTEN;
-			cd9660_compute_full_filename(writenode,
-			    temp_file_name);
-			ret = cd9660_copy_file(diskStructure, fd,
-			    writenode->fileDataSector, temp_file_name);
-			if (ret == 0)
-				goto out;
+			temp_file_name = cd9660_compute_full_filename(writenode);
+			if (temp_file_name == NULL)
+				return 0;
+			if (cd9660_copy_file(diskStructure, fd,
+			    writenode->fileDataSector, temp_file_name) == 0)
+				return 0;
 		}
 	} else {
 		/*
@@ -304,7 +280,7 @@ cd9660_write_file(iso9660_disk *diskStructure, FILE *fd, cd9660node *writenode)
 		/*
 		 * Now loop over children, writing out their directory
 		 * records - beware of sector boundaries
-	 	 */
+		 */
 		TAILQ_FOREACH(temp, &writenode->cn_children, cn_next_child) {
 			/*
 			 * Copy the temporary record and adjust its size
@@ -343,7 +319,7 @@ cd9660_write_file(iso9660_disk *diskStructure, FILE *fd, cd9660node *writenode)
 				    temp->su_tail_size, fd);
 			if (ferror(fd)) {
 				warnx("%s: write error", __func__);
-				goto out;
+				return 0;
 			}
 			cur_sector_offset += temp_record.length[0];
 
@@ -353,16 +329,11 @@ cd9660_write_file(iso9660_disk *diskStructure, FILE *fd, cd9660node *writenode)
 		 * Recurse on children.
 		 */
 		TAILQ_FOREACH(temp, &writenode->cn_children, cn_next_child) {
-			if ((ret = cd9660_write_file(diskStructure, fd, temp))
-			    == 0)
-				goto out;
+			if (cd9660_write_file(diskStructure, fd, temp) == 0)
+				return 0;
 		}
 	}
-	rv = 1;
-out:
-	free(temp_file_name);
-	free(buf);
-	return rv;
+	return 1;
 }
 
 /*
@@ -428,9 +399,6 @@ cd9660_copy_file(iso9660_disk *diskStructure, FILE *fd, off_t start_sector,
 		free(buf);
 		return 0;
 	}
-
-	if (diskStructure->verbose_level > 1)
-		printf("Writing file: %s\n",filename);
 
 	if (fseeko(fd, start_sector * diskStructure->sectorSize, SEEK_SET) == -1)
 		err(1, "fseeko");

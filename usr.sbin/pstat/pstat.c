@@ -1,4 +1,4 @@
-/*	$OpenBSD: pstat.c,v 1.111 2016/10/23 18:14:01 kettenis Exp $	*/
+/*	$OpenBSD: pstat.c,v 1.113 2017/02/09 22:21:53 jca Exp $	*/
 /*	$NetBSD: pstat.c,v 1.27 1996/10/23 22:50:06 cgd Exp $	*/
 
 /*-
@@ -308,7 +308,8 @@ main(int argc, char *argv[])
 			}
 
 			printf("at %p: ", (void *)nl[i].n_value);
-			if (nl[i].n_type == N_DATA) {
+			if ((nl[i].n_type & N_TYPE) == N_DATA ||
+			    (nl[i].n_type & N_TYPE) == N_COMM) {
 				if (stringformat) {
 					KGET1(i, &buf, sizeof(buf), argv[i]);
 					buf[sizeof(buf) - 1] = '\0';
@@ -989,17 +990,8 @@ ttyprt(struct itty *tp)
 	case TTYDISC:
 		(void)printf("term\n");
 		break;
-	case TABLDISC:
-		(void)printf("tab\n");
-		break;
-	case SLIPDISC:
-		(void)printf("slip\n");
-		break;
 	case PPPDISC:
 		(void)printf("ppp\n");
-		break;
-	case STRIPDISC:
-		(void)printf("strip\n");
 		break;
 	case NMEADISC:
 		(void)printf("nmea\n");

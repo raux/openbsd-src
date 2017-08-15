@@ -1,4 +1,4 @@
-/* $OpenBSD: cfg.c,v 1.50 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cfg.c,v 1.60 2017/05/30 21:44:59 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -23,16 +23,23 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h>
 #include <util.h>
 
 #include "tmux.h"
 
-char			 *cfg_file;
+static char		 *cfg_file;
 int			  cfg_finished;
 static char		**cfg_causes;
 static u_int		  cfg_ncauses;
-struct client		 *cfg_client;
+static struct cmdq_item	 *cfg_item;
+
+static enum cmd_retval
+cfg_client_done(__unused struct cmdq_item *item, __unused void *data)
+{
+	if (!cfg_finished)
+		return (CMD_RETURN_WAIT);
+	return (CMD_RETURN_NORMAL);
+}
 
 static enum cmd_retval
 cfg_done(__unused struct cmdq_item *item, __unused void *data)
@@ -44,8 +51,11 @@ cfg_done(__unused struct cmdq_item *item, __unused void *data)
 	if (!RB_EMPTY(&sessions))
 		cfg_show_causes(RB_MIN(sessions, &sessions));
 
-	if (cfg_client != NULL)
-		server_client_unref(cfg_client);
+	if (cfg_item != NULL)
+		cfg_item->flags &= ~CMDQ_WAITING;
+
+	status_prompt_load_history();
+
 	return (CMD_RETURN_NORMAL);
 }
 
@@ -61,33 +71,49 @@ start_cfg(void)
 {
 	const char	*home;
 	int		 quiet = 0;
+	struct client	*c;
 
-	cfg_client = TAILQ_FIRST(&clients);
-	if (cfg_client != NULL)
-		cfg_client->references++;
+	/*
+	 * Configuration files are loaded without a client, so NULL is passed
+	 * into load_cfg() and commands run in the global queue with
+	 * item->client NULL.
+	 *
+	 * However, we must block the initial client (but just the initial
+	 * client) so that its command runs after the configuration is loaded.
+	 * Because start_cfg() is called so early, we can be sure the client's
+	 * command queue is currently empty and our callback will be at the
+	 * front - we need to get in before MSG_COMMAND.
+	 */
+	c = TAILQ_FIRST(&clients);
+	if (c != NULL) {
+		cfg_item = cmdq_get_callback(cfg_client_done, NULL);
+		cmdq_append(c, cfg_item);
+	}
 
-	load_cfg(TMUX_CONF, cfg_client, NULL, 1);
+	load_cfg(TMUX_CONF, NULL, NULL, 1);
 
 	if (cfg_file == NULL && (home = find_home()) != NULL) {
 		xasprintf(&cfg_file, "%s/.tmux.conf", home);
 		quiet = 1;
 	}
 	if (cfg_file != NULL)
-		load_cfg(cfg_file, cfg_client, NULL, quiet);
+		load_cfg(cfg_file, NULL, NULL, quiet);
 
-	cmdq_append(cfg_client, cmdq_get_callback(cfg_done, NULL));
+	cmdq_append(NULL, cmdq_get_callback(cfg_done, NULL));
 }
 
 int
 load_cfg(const char *path, struct client *c, struct cmdq_item *item, int quiet)
 {
 	FILE			*f;
-	char			 delim[3] = { '\\', '\\', '\0' };
-	u_int			 found;
+	const char		 delim[3] = { '\\', '\\', '\0' };
+	u_int			 found = 0;
 	size_t			 line = 0;
-	char			*buf, *cause1, *p;
+	char			*buf, *cause1, *p, *q, *s;
 	struct cmd_list		*cmdlist;
 	struct cmdq_item	*new_item;
+	int			 condition = 0;
+	struct format_tree	*ft;
 
 	log_debug("loading %s", path);
 	if ((f = fopen(path, "rb")) == NULL) {
@@ -97,21 +123,51 @@ load_cfg(const char *path, struct client *c, struct cmdq_item *item, int quiet)
 		return (-1);
 	}
 
-	found = 0;
 	while ((buf = fparseln(f, NULL, &line, delim, 0)) != NULL) {
 		log_debug("%s: %s", path, buf);
 
-		/* Skip empty lines. */
 		p = buf;
-		while (isspace((u_char) *p))
+		while (isspace((u_char)*p))
 			p++;
 		if (*p == '\0') {
 			free(buf);
 			continue;
 		}
+		q = p + strlen(p) - 1;
+		while (q != p && isspace((u_char)*q))
+			*q-- = '\0';
 
-		/* Parse and run the command. */
-		if (cmd_string_parse(p, &cmdlist, path, line, &cause1) != 0) {
+		if (condition != 0 && strcmp(p, "%endif") == 0) {
+			condition = 0;
+			continue;
+		}
+		if (strncmp(p, "%if ", 4) == 0) {
+			if (condition != 0) {
+				cfg_add_cause("%s:%zu: nested %%if", path,
+				    line);
+				continue;
+			}
+			ft = format_create(NULL, NULL, FORMAT_NONE,
+			    FORMAT_NOJOBS);
+
+			s = p + 3;
+			while (isspace((u_char)*s))
+				s++;
+			s = format_expand(ft, s);
+			if (*s != '\0' && (s[0] != '0' || s[1] != '\0'))
+				condition = 1;
+			else
+				condition = -1;
+			free(s);
+
+			format_free(ft);
+			continue;
+		}
+		if (condition == -1)
+			continue;
+
+		cmdlist = cmd_string_parse(p, path, line, &cause1);
+		if (cmdlist == NULL) {
 			free(buf);
 			if (cause1 == NULL)
 				continue;
@@ -177,7 +233,7 @@ cfg_show_causes(struct session *s)
 		return;
 	wp = s->curw->window->active;
 
-	window_pane_set_mode(wp, &window_copy_mode);
+	window_pane_set_mode(wp, &window_copy_mode, NULL, NULL);
 	window_copy_init_for_output(wp);
 	for (i = 0; i < cfg_ncauses; i++) {
 		window_copy_add(wp, "%s", cfg_causes[i]);

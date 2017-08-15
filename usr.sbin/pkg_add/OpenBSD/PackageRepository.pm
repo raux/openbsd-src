@@ -1,5 +1,5 @@
 # ex:ts=8 sw=4:
-# $OpenBSD: PackageRepository.pm,v 1.138 2016/10/05 13:50:20 espie Exp $
+# $OpenBSD: PackageRepository.pm,v 1.146 2017/08/04 11:53:03 sthen Exp $
 #
 # Copyright (c) 2003-2010 Marc Espie <espie@openbsd.org>
 #
@@ -112,8 +112,16 @@ sub installed() { 'OpenBSD::PackageRepository::Installed' }
 sub parse
 {
 	my ($class, $r, $state) = @_;
+
+	{
+	no warnings qw(uninitialized);	# in case installpath is empty
+	$$r =~ s/^installpath(\:|$)/$state->installpath.$1/e;
+	}
+
 	my $u = $$r;
 	return undef if $u eq '';
+
+		
 
 	if ($u =~ m/^ftp\:/io) {
 		return $class->ftp->parse_fullurl($r, $state);
@@ -157,7 +165,8 @@ sub stemlist
 		require OpenBSD::PackageName;
 		my @l = $self->available;
 		if (@l == 0 && !$self->{empty_okay}) {
-			$self->{state}->errsay("#1 is empty", $self->url);
+			$self->{state}->errsay("#1: #2", $self->url,
+				$self->{no_such_dir} ? "no such dir" : "empty");
 		}
 		$self->{stemlist} = OpenBSD::PackageName::avail2stems(@l);
 	}
@@ -239,6 +248,7 @@ sub open
 
 	# kill old files if too many
 	my $already = $self->make_room;
+	local $SIG{'PIPE'} = 'DEFAULT';
 	my $fh = $self->open_pipe($object);
 	if (!defined $fh) {
 		return;
@@ -281,6 +291,7 @@ sub parse_problems
 	my $notyet = 1;
 	my $broken = 0;
 	my $signify_error = 0;
+	$self->{last_error} = 0;
 	while(<$fh>) {
 		next if m/^(?:200|220|221|226|229|230|227|250|331|500|150)[\s\-]/o;
 		next if m/^EPSV command not understood/o;
@@ -298,28 +309,41 @@ sub parse_problems
 			$broken = 1;
 			next;
 		}
+		# http error
+		if (m/^ftp: Error retrieving file: 404/o) {
+			if (!defined $object) {
+				$self->{no_such_dir} = 1;
+				next;
+			} else {
+				$self->{lasterror} = 404;
+			}
+			# ignore errors for stable packages
+			next if $self->can_be_empty;
+		}
 
 		if (defined $hint && $hint == 0) {
 			next if m/^ftp: -: short write/o;
 			next if m/^ftp: local: -: Broken pipe/o;
 			next if m/^421\s+/o;
 		}
+		# not retrieving the file => always the same message
+		# so it's superfluous
+		next if m/^signify:/ && $self->{lasterror};
+		if ($notyet) {
+			$self->{state}->errprint("#1: ", $url);
+			if (defined $object) {
+				$object->{error_reported} = 1;
+			}
+			$notyet = 0;
+		}
 		if (m/^signify:/) {
 			$signify_error = 1;
-			s/.*unsigned .*archive.*/unsigned package/;
-		}
-		if ($notyet) {
-			$self->{state}->errsay("Error from #1", $url);
-			$notyet = 0;
+			s/.*unsigned .*archive.*/unsigned package (signify(1) doesn't see old-style signatures)/;
 		}
 		if (m/^421\s+/o ||
 		    m/^ftp: connect: Connection timed out/o ||
 		    m/^ftp: Can't connect or login to host/o) {
 			$self->{lasterror} = 421;
-		}
-		# http error
-		if (m/^ftp: Error retrieving file: 404/o) {
-		    	$self->{lasterror} = 404;
 		}
 		if (m/^550\s+/o) {
 			$self->{lasterror} = 550;
@@ -459,6 +483,9 @@ sub parse_fullurl
 	if (!$ok && $o->{path} eq $class->pkg_db."/") {
 		return $class->installed->new(0, $state);
 	} else {
+		if ($o->{path} eq './') {
+			$o->can_be_empty;
+		}
 		return $class->unique($o);
 	}
 }
@@ -558,6 +585,10 @@ sub parse_url
 		$$r = $path;
 		my $o = $class->SUPER::parse_url($r, $state);
 		$o->{host} = $host;
+		if (defined $o->{release}) {
+			$o->can_be_empty;
+			$$r = $class->urlscheme."://$o->{host}$o->{release}:$$r";
+		}
 		return $o;
 	} else {
 		return undef;
@@ -867,12 +898,6 @@ sub list
 		}
 		$self->{list} = $self->obtain_list($error);
 		$self->parse_problems($error);
-		if ($self->{no_such_dir}) {
-			$self->{state}->errsay(
-			    "#1: Directory does not exist on #2",
-			    $self->{path}, $self->{host});
-		    	$self->{lasterror} = 404;
-		}
 	}
 	return $self->{list};
 }
@@ -887,7 +912,7 @@ sub get_http_list
 	    $error) or return;
 	while(<$fh>) {
 		chomp;
-		for my $pkg (m/\<A\s+HREF=\"(.*?\.tgz)\"\>/gio) {
+		for my $pkg (m/\<A[^>]*\s+HREF=\"(.*?\.tgz)\"/gio) {
 			$pkg = $1 if $pkg =~ m|^.*/(.*)$|;
 			# decode uri-encoding; from URI::Escape
 			$pkg =~ s/%([0-9A-Fa-f]{2})/chr(hex($1))/eg;

@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.9 2016/10/05 17:30:13 reyk Exp $	*/
+/*	$OpenBSD: proc.h,v 1.12 2017/03/27 00:28:04 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -154,8 +154,8 @@ struct privsep_fd {
 #define DPRINTF(x...)	do {} while(0)
 #endif
 
-#define PROC_PARENT_SOCK_FILENO 3
-#define PROC_MAX_INSTANCES      32
+#define PROC_PARENT_SOCK_FILENO	3
+#define PROC_MAX_INSTANCES	32
 
 /* proc.c */
 void	 proc_init(struct privsep *, struct privsep_proc *, unsigned int,
@@ -187,6 +187,7 @@ struct imsgev *
 	 proc_iev(struct privsep *, enum privsep_procid, int);
 enum privsep_procid
 	 proc_getid(struct privsep_proc *, unsigned int, const char *);
+int	 proc_flush_imsg(struct privsep *, enum privsep_procid, int);
 
 /* control.c */
 void	 control(struct privsep *, struct privsep_proc *);
@@ -197,7 +198,8 @@ void	 control_cleanup(struct control_sock *);
 /* log.c */
 void	log_init(int, int);
 void	log_procinit(const char *);
-void	log_verbose(int);
+void	log_setverbose(int);
+int	log_getverbose(void);
 void	log_warn(const char *, ...)
 	    __attribute__((__format__ (printf, 1, 2)));
 void	log_warnx(const char *, ...)

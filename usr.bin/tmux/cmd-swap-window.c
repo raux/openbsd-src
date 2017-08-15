@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-swap-window.c,v 1.20 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-swap-window.c,v 1.23 2017/04/22 10:22:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -35,8 +35,8 @@ const struct cmd_entry cmd_swap_window_entry = {
 	.args = { "ds:t:", 0, 0 },
 	.usage = "[-d] " CMD_SRCDST_WINDOW_USAGE,
 
-	.sflag = CMD_WINDOW_MARKED,
-	.tflag = CMD_WINDOW,
+	.source = { 's', CMD_FIND_WINDOW, CMD_FIND_DEFAULT_MARKED },
+	.target = { 't', CMD_FIND_WINDOW, 0 },
 
 	.flags = 0,
 	.exec = cmd_swap_window_exec
@@ -48,15 +48,15 @@ cmd_swap_window_exec(struct cmd *self, struct cmdq_item *item)
 	struct session		*src, *dst;
 	struct session_group	*sg_src, *sg_dst;
 	struct winlink		*wl_src, *wl_dst;
-	struct window		*w;
+	struct window		*w_src, *w_dst;
 
-	wl_src = item->state.sflag.wl;
-	src = item->state.sflag.s;
-	sg_src = session_group_find(src);
+	wl_src = item->source.wl;
+	src = item->source.s;
+	sg_src = session_group_contains(src);
 
-	wl_dst = item->state.tflag.wl;
-	dst = item->state.tflag.s;
-	sg_dst = session_group_find(dst);
+	wl_dst = item->target.wl;
+	dst = item->target.s;
+	sg_dst = session_group_contains(dst);
 
 	if (src != dst && sg_src != NULL && sg_dst != NULL &&
 	    sg_src == sg_dst) {
@@ -67,9 +67,15 @@ cmd_swap_window_exec(struct cmd *self, struct cmdq_item *item)
 	if (wl_dst->window == wl_src->window)
 		return (CMD_RETURN_NORMAL);
 
-	w = wl_dst->window;
-	wl_dst->window = wl_src->window;
-	wl_src->window = w;
+	w_dst = wl_dst->window;
+	TAILQ_REMOVE(&w_dst->winlinks, wl_dst, wentry);
+	w_src = wl_src->window;
+	TAILQ_REMOVE(&w_src->winlinks, wl_src, wentry);
+
+	wl_dst->window = w_src;
+	TAILQ_INSERT_TAIL(&w_src->winlinks, wl_dst, wentry);
+	wl_src->window = w_dst;
+	TAILQ_INSERT_TAIL(&w_dst->winlinks, wl_src, wentry);
 
 	if (!args_has(self->args, 'd')) {
 		session_select(dst, wl_dst->idx);

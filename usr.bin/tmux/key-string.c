@@ -1,4 +1,4 @@
-/* $OpenBSD: key-string.c,v 1.40 2016/10/11 09:30:36 nicm Exp $ */
+/* $OpenBSD: key-string.c,v 1.47 2017/06/23 15:36:52 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -110,12 +110,16 @@ static const struct {
 static key_code
 key_string_search_table(const char *string)
 {
-	u_int	i;
+	u_int	i, user;
 
 	for (i = 0; i < nitems(key_string_table); i++) {
 		if (strcasecmp(string, key_string_table[i].string) == 0)
 			return (key_string_table[i].key);
 	}
+
+	if (sscanf(string, "User%u", &user) == 1 && user < KEYC_NUSER)
+		return (KEYC_USER + user);
+
 	return (KEYC_UNKNOWN);
 }
 
@@ -140,6 +144,9 @@ key_string_get_modifiers(const char **string)
 		case 's':
 			modifiers |= KEYC_SHIFT;
 			break;
+		default:
+			*string = NULL;
+			return (0);
 		}
 		*string += 2;
 	}
@@ -179,7 +186,7 @@ key_string_lookup_string(const char *string)
 		string++;
 	}
 	modifiers |= key_string_get_modifiers(&string);
-	if (string[0] == '\0')
+	if (string == NULL || string[0] == '\0')
 		return (KEYC_UNKNOWN);
 
 	/* Is this a standard ASCII key? */
@@ -229,7 +236,7 @@ key_string_lookup_string(const char *string)
 const char *
 key_string_lookup_key(key_code key)
 {
-	static char		out[24];
+	static char		out[32];
 	char			tmp[8];
 	u_int			i;
 	struct utf8_data	ud;
@@ -244,8 +251,28 @@ key_string_lookup_key(key_code key)
 	/* Handle special keys. */
 	if (key == KEYC_UNKNOWN)
 		return ("Unknown");
+	if (key == KEYC_FOCUS_IN)
+		return ("FocusIn");
+	if (key == KEYC_FOCUS_OUT)
+		return ("FocusOut");
+	if (key == KEYC_PASTE_START)
+		return ("PasteStart");
+	if (key == KEYC_PASTE_END)
+		return ("PasteEnd");
 	if (key == KEYC_MOUSE)
 		return ("Mouse");
+	if (key == KEYC_DRAGGING)
+		return ("Dragging");
+	if (key == KEYC_MOUSEMOVE_PANE)
+		return ("MouseMovePane");
+	if (key == KEYC_MOUSEMOVE_STATUS)
+		return ("MouseMoveStatus");
+	if (key == KEYC_MOUSEMOVE_BORDER)
+		return ("MouseMoveBorder");
+	if (key >= KEYC_USER && key < KEYC_USER + KEYC_NUSER) {
+		snprintf(out, sizeof out, "User%u", (u_int)(key - KEYC_USER));
+		return (out);
+	}
 
 	/*
 	 * Special case: display C-@ as C-Space. Could do this below in

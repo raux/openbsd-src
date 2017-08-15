@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_vnops.c,v 1.5 2016/10/17 01:16:22 tedu Exp $	*/
+/*	$OpenBSD: msdosfs_vnops.c,v 1.8 2016/12/17 16:43:30 krw Exp $	*/
 /*	$NetBSD: msdosfs_vnops.c,v 1.17 2016/01/30 09:59:27 mlelstv Exp $ */
 
 /*-
@@ -53,13 +53,13 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#include <ffs/buf.h>
+#include "ffs/buf.h"
 
-#include <fs/msdosfs/bpb.h>
-#include <fs/msdosfs/direntry.h>
-#include <fs/msdosfs/denode.h>
-#include <fs/msdosfs/msdosfsmount.h>
-#include <fs/msdosfs/fat.h>
+#include <msdosfs/bpb.h>
+#include "msdos/direntry.h"
+#include "msdos/denode.h"
+#include "msdos/msdosfsmount.h"
+#include "msdos/fat.h"
 
 #include "makefs.h"
 #include "msdos.h"
@@ -115,7 +115,7 @@ msdosfs_times(struct msdosfsmount *pmp, struct denode *dep,
  * memory denode's will be in synch.
  */
 static int
-msdosfs_findslot(struct denode *dp, struct componentname *cnp) 
+msdosfs_findslot(struct denode *dp, struct componentname *cnp)
 {
 	daddr_t bn;
 	int error;
@@ -473,7 +473,7 @@ msdosfs_wfile(const char *path, struct denode *dep, fsnode *node)
 		    0, &bp)) != 0) {
 			DPRINTF(("bread %d\n", error));
 			goto out;
-		} 
+		}
 		cpsize = MIN((nsize - offs), blsize - on);
 		memcpy((char *)bp->b_data + on, dat + offs, cpsize);
 		bwrite(bp);

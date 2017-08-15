@@ -1,4 +1,4 @@
-/*	$OpenBSD: file.c,v 1.269 2016/10/15 22:20:17 millert Exp $	*/
+/*	$OpenBSD: file.c,v 1.273 2017/06/01 08:38:56 joris Exp $	*/
 /*
  * Copyright (c) 2006 Joris Vink <joris@openbsd.org>
  * Copyright (c) 2004 Jean-Francois Brousseau <jfb@openbsd.org>
@@ -252,8 +252,7 @@ cvs_file_get_cf(const char *d, const char *f, const char *fpath, int fd,
 	if (cf->fd != -1)
 		cf->file_flags |= FILE_ON_DISK;
 
-	if (current_cvsroot->cr_method != CVS_METHOD_LOCAL ||
-	    cvs_server_active == 1)
+	if (cvsroot_is_remote() || cvs_server_active == 1)
 		cvs_validate_directory(cf->file_path);
 
 	return (cf);
@@ -301,7 +300,7 @@ cvs_file_walklist(struct cvs_flisthead *fl, struct cvs_recursion *cr)
 					goto next;
 				}
 			}
-		} else if (current_cvsroot->cr_method == CVS_METHOD_LOCAL) {
+		} else if (cvsroot_is_local()) {
 			/*
 			 * During checkout -p, do not use any locally
 			 * available directories.
@@ -361,8 +360,7 @@ cvs_file_walklist(struct cvs_flisthead *fl, struct cvs_recursion *cr)
 					cvs_directory_tag =
 					    xstrdup(cvs_specified_tag);
 
-				if (current_cvsroot->cr_method ==
-				    CVS_METHOD_LOCAL) {
+				if (cvsroot_is_local()) {
 					cvs_get_repository_path(cf->file_wd,
 					    repo, PATH_MAX);
 					cvs_repository_lock(repo,
@@ -374,8 +372,10 @@ cvs_file_walklist(struct cvs_flisthead *fl, struct cvs_recursion *cr)
 				cr->fileproc(cf);
 
 			if (l->flags & FILE_USER_SUPPLIED) {
-				if (cmdp->cmd_flags & CVS_LOCK_REPO)
+				if (cvsroot_is_local() &&
+				    (cmdp->cmd_flags & CVS_LOCK_REPO)) {
 					cvs_repository_unlock(repo);
+				}
 				free(cvs_directory_tag);
 				cvs_directory_tag = NULL;
 			}
@@ -484,15 +484,17 @@ cvs_file_walkdir(struct cvs_file *cf, struct cvs_recursion *cr)
 				continue;
 			}
 
+			(void)xsnprintf(fpath, PATH_MAX, "%s/%s",
+			    cf->file_path, dp->d_name);
+
 			if (cvs_file_chkign(dp->d_name) &&
 			    cvs_cmdop != CVS_OP_RLOG &&
 			    cvs_cmdop != CVS_OP_RTAG) {
+				if (cvs_cmdop == CVS_OP_IMPORT)
+					cvs_import_ignored(fpath);
 				cp += dp->d_reclen;
 				continue;
 			}
-
-			(void)xsnprintf(fpath, PATH_MAX, "%s/%s",
-			    cf->file_path, dp->d_name);
 
 			/*
 			 * nfs and afs will show d_type as DT_UNKNOWN
@@ -585,7 +587,7 @@ cvs_file_walkdir(struct cvs_file *cf, struct cvs_recursion *cr)
 	}
 
 walkrepo:
-	if (current_cvsroot->cr_method == CVS_METHOD_LOCAL) {
+	if (cvsroot_is_local()) {
 		cvs_get_repository_path(cf->file_path, repo, PATH_MAX);
 		cvs_repository_lock(repo, (cmdp->cmd_flags & CVS_LOCK_REPO));
 	}
@@ -604,8 +606,7 @@ walkrepo:
 	cvs_file_walklist(&fl, cr);
 	cvs_file_freelist(&fl);
 
-	if (current_cvsroot->cr_method == CVS_METHOD_LOCAL &&
-	    (cmdp->cmd_flags & CVS_LOCK_REPO))
+	if (cvsroot_is_local() && (cmdp->cmd_flags & CVS_LOCK_REPO))
 		cvs_repository_unlock(repo);
 
 	if (cvs_directory_tag != NULL && cmdp->cmd_flags & CVS_USE_WDIR) {
@@ -673,7 +674,7 @@ cvs_file_classify(struct cvs_file *cf, const char *tag)
 		cf->file_ent = NULL;
 
 	if (cf->file_ent != NULL) {
-		if (cf->file_ent->ce_tag != NULL && cvs_specified_tag == NULL)
+		if (cvs_specified_tag == NULL)
 			tag = cf->file_ent->ce_tag;
 
 		if (cf->file_flags & FILE_ON_DISK &&

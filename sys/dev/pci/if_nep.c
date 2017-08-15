@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_nep.c,v 1.26 2016/09/15 02:00:17 dlg Exp $	*/
+/*	$OpenBSD: if_nep.c,v 1.30 2017/04/11 14:43:49 dhill Exp $	*/
 /*
  * Copyright (c) 2014, 2015 Mark Kettenis
  *
@@ -1091,7 +1091,6 @@ nep_tx_proc(struct nep_softc *sc)
 
 			m_freem(txb->nb_m);
 			txb->nb_m = NULL;
-			ifp->if_opackets++;
 			count--;
 		}
 

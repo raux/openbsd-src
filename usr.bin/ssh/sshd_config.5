@@ -33,15 +33,13 @@
 .\" (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
 .\" THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 .\"
-.\" $OpenBSD: sshd_config.5,v 1.237 2016/10/07 14:41:52 jmc Exp $
-.Dd $Mdocdate: October 7 2016 $
+.\" $OpenBSD: sshd_config.5,v 1.250 2017/07/23 23:37:02 djm Exp $
+.Dd $Mdocdate: July 23 2017 $
 .Dt SSHD_CONFIG 5
 .Os
 .Sh NAME
 .Nm sshd_config
 .Nd OpenSSH SSH daemon configuration file
-.Sh SYNOPSIS
-.Nm /etc/ssh/sshd_config
 .Sh DESCRIPTION
 .Xr sshd 8
 reads configuration data from
@@ -438,6 +436,10 @@ If the specified value begins with a
 .Sq +
 character, then the specified ciphers will be appended to the default set
 instead of replacing them.
+If the specified value begins with a
+.Sq -
+character, then the specified ciphers (including wildcards) will be removed
+from the default set instead of replacing them.
 .Pp
 The supported ciphers are:
 .Pp
@@ -460,16 +462,6 @@ aes256-ctr
 aes128-gcm@openssh.com
 .It
 aes256-gcm@openssh.com
-.It
-arcfour
-.It
-arcfour128
-.It
-arcfour256
-.It
-blowfish-cbc
-.It
-cast128-cbc
 .It
 chacha20-poly1305@openssh.com
 .El
@@ -565,6 +557,18 @@ and finally
 See PATTERNS in
 .Xr ssh_config 5
 for more information on patterns.
+.It Cm DisableForwarding
+Disables all forwarding features, including X11,
+.Xr ssh-agent 1 ,
+TCP and StreamLocal.
+This option overrides all other forwarding-related options and may
+simplify restricted configurations.
+.It Cm ExposeAuthInfo
+Enables writing a file containing a list of authentication methods and
+public credentials (e.g. keys) used to authenticate the user.
+The location of the file is exposed to the user session through the
+.Ev SSH_USER_AUTH
+environment variable.
 .It Cm FingerprintHash
 Specifies the hash algorithm used when logging key fingerprints.
 Valid options are:
@@ -644,6 +648,10 @@ Alternately if the specified value begins with a
 .Sq +
 character, then the specified key types will be appended to the default set
 instead of replacing them.
+If the specified value begins with a
+.Sq -
+character, then the specified key types (including wildcards) will be removed
+from the default set instead of replacing them.
 The default for this option is:
 .Bd -literal -offset 3n
 ecdsa-sha2-nistp256-cert-v01@openssh.com,
@@ -785,7 +793,9 @@ Accepted values are
 .Cm lowdelay ,
 .Cm throughput ,
 .Cm reliability ,
-or a numeric value.
+a numeric value, or
+.Cm none
+to use the operating system default.
 This option may take one or two arguments, separated by whitespace.
 If one argument is specified, it is used as the packet class unconditionally.
 If two values are specified, the first is automatically selected for
@@ -838,6 +848,10 @@ Alternately if the specified value begins with a
 .Sq +
 character, then the specified methods will be appended to the default set
 instead of replacing them.
+If the specified value begins with a
+.Sq -
+character, then the specified methods (including wildcards) will be removed
+from the default set instead of replacing them.
 The supported algorithms are:
 .Pp
 .Bl -item -compact -offset indent
@@ -928,6 +942,10 @@ If the specified value begins with a
 .Sq +
 character, then the specified algorithms will be appended to the default set
 instead of replacing them.
+If the specified value begins with a
+.Sq -
+character, then the specified algorithms (including wildcards) will be removed
+from the default set instead of replacing them.
 .Pp
 The algorithms that contain
 .Qq -etm
@@ -940,8 +958,6 @@ The supported MACs are:
 hmac-md5
 .It
 hmac-md5-96
-.It
-hmac-ripemd160
 .It
 hmac-sha1
 .It
@@ -958,8 +974,6 @@ umac-128@openssh.com
 hmac-md5-etm@openssh.com
 .It
 hmac-md5-96-etm@openssh.com
-.It
-hmac-ripemd160-etm@openssh.com
 .It
 hmac-sha1-etm@openssh.com
 .It
@@ -1046,6 +1060,8 @@ Available keywords are
 .Cm AuthorizedPrincipalsFile ,
 .Cm Banner ,
 .Cm ChrootDirectory ,
+.Cm ClientAliveCountMax ,
+.Cm ClientAliveInterval ,
 .Cm DenyGroups ,
 .Cm DenyUsers ,
 .Cm ForceCommand ,
@@ -1057,6 +1073,7 @@ Available keywords are
 .Cm IPQoS ,
 .Cm KbdInteractiveAuthentication ,
 .Cm KerberosAuthentication ,
+.Cm LogLevel ,
 .Cm MaxAuthTries ,
 .Cm MaxSessions ,
 .Cm PasswordAuthentication ,
@@ -1273,6 +1290,10 @@ Alternately if the specified value begins with a
 .Sq +
 character, then the specified key types will be appended to the default set
 instead of replacing them.
+If the specified value begins with a
+.Sq -
+character, then the specified key types (including wildcards) will be removed
+from the default set instead of replacing them.
 The default for this option is:
 .Bd -literal -offset 3n
 ecdsa-sha2-nistp256-cert-v01@openssh.com,
@@ -1443,28 +1464,6 @@ and
 .Cm Match
 .Cm Host
 directives.
-.It Cm UsePrivilegeSeparation
-Specifies whether
-.Xr sshd 8
-separates privileges by creating an unprivileged child process
-to deal with incoming network traffic.
-After successful authentication, another process will be created that has
-the privilege of the authenticated user.
-The goal of privilege separation is to prevent privilege
-escalation by containing any corruption within the unprivileged processes.
-The argument must be
-.Cm yes ,
-.Cm no ,
-or
-.Cm sandbox .
-If
-.Cm UsePrivilegeSeparation
-is set to
-.Cm sandbox
-then the pre-authentication unprivileged process is subject to additional
-restrictions.
-The default is
-.Cm sandbox .
 .It Cm VersionAddendum
 Optionally specifies additional text to append to the SSH protocol banner
 sent by the server upon connection.
@@ -1613,13 +1612,13 @@ The username.
 .El
 .Pp
 .Cm AuthorizedKeysCommand
-accepts the tokens %%, %f, %h, %t, and %u.
+accepts the tokens %%, %f, %h, %k, %t, and %u.
 .Pp
 .Cm AuthorizedKeysFile
 accepts the tokens %%, %h, and %u.
 .Pp
 .Cm AuthorizedPrincipalsCommand
-accepts the tokens %%, %F, %f, %K, %k, %h, %i, %s, %T, %t, and %u.
+accepts the tokens %%, %F, %f, %h, %i, %K, %k, %s, %T, %t, and %u.
 .Pp
 .Cm AuthorizedPrincipalsFile
 accepts the tokens %%, %h, and %u.

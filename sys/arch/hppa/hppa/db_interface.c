@@ -1,4 +1,4 @@
-/*	$OpenBSD: db_interface.c,v 1.38 2016/09/19 21:18:35 jasper Exp $	*/
+/*	$OpenBSD: db_interface.c,v 1.41 2017/07/16 22:48:38 guenther Exp $	*/
 
 /*
  * Copyright (c) 1999-2003 Michael Shalayeff
@@ -125,7 +125,7 @@ struct db_variable *db_eregs = db_regs + nitems(db_regs);
 int db_active = 0;
 
 void
-Debugger()
+db_enter(void)
 {
 	extern int kernelmapped;	/* from locore.S */
 	if (kernelmapped)
@@ -227,7 +227,7 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
     char *modif, int (*pr)(const char *, ...))
 {
 	register_t *fp, pc, rp, *argp;
-	db_sym_t sym;
+	Elf_Sym *sym;
 	db_expr_t off;
 	char *name;
 	int nargs;
@@ -309,5 +309,28 @@ db_stack_trace_print(db_expr_t addr, int have_addr, db_expr_t count,
 	if (count && pc) {
 		db_printsym(pc, DB_STGY_XTRN, pr);
 		(*pr)(":\n");
+	}
+}
+
+void
+db_save_stack_trace(struct db_stack_trace *st)
+{
+	register_t *fp, pc, rp;
+	int	i;
+
+	fp = (register_t *)__builtin_frame_address(0);
+	pc = 0;
+	rp = fp[-5];
+
+	for (i = 0; i < DB_STACK_TRACE_MAX; i++) {
+		st->st_pc[st->st_count++] = rp;
+
+		/* next frame */
+		pc = rp;
+		if (!fp[0] || USERMODE(pc))
+			break;
+
+		rp = fp[-5];
+		fp = (register_t *)fp[0];
 	}
 }

@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-capture-pane.c,v 1.41 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-capture-pane.c,v 1.44 2017/04/22 10:22:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Jonathan Alvarado <radobobo@users.sourceforge.net>
@@ -43,7 +43,20 @@ const struct cmd_entry cmd_capture_pane_entry = {
 	.usage = "[-aCeJpPq] " CMD_BUFFER_USAGE " [-E end-line] "
 		 "[-S start-line]" CMD_TARGET_PANE_USAGE,
 
-	.tflag = CMD_PANE,
+	.target = { 't', CMD_FIND_PANE, 0 },
+
+	.flags = CMD_AFTERHOOK,
+	.exec = cmd_capture_pane_exec
+};
+
+const struct cmd_entry cmd_clear_history_entry = {
+	.name = "clear-history",
+	.alias = "clearhist",
+
+	.args = { "t:", 0, 0 },
+	.usage = CMD_TARGET_PANE_USAGE,
+
+	.target = { 't', CMD_FIND_PANE, 0 },
 
 	.flags = CMD_AFTERHOOK,
 	.exec = cmd_capture_pane_exec
@@ -77,7 +90,7 @@ cmd_capture_pane_pending(struct args *args, struct window_pane *wp,
 	buf = xstrdup("");
 	if (args_has(args, 'C')) {
 		for (i = 0; i < linelen; i++) {
-			if (line[i] >= ' ') {
+			if (line[i] >= ' ' && line[i] != '\\') {
 				tmp[0] = line[i];
 				tmp[1] = '\0';
 			} else
@@ -91,7 +104,6 @@ cmd_capture_pane_pending(struct args *args, struct window_pane *wp,
 }
 
 static char *
-
 cmd_capture_pane_history(struct args *args, struct cmdq_item *item,
     struct window_pane *wp, size_t *len)
 {
@@ -181,10 +193,17 @@ cmd_capture_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = self->args;
 	struct client		*c;
-	struct window_pane	*wp = item->state.tflag.wp;
+	struct window_pane	*wp = item->target.wp;
 	char			*buf, *cause;
 	const char		*bufname;
 	size_t			 len;
+
+	if (self->entry == &cmd_clear_history_entry) {
+		if (wp->mode == &window_copy_mode)
+			window_pane_reset_mode(wp);
+		grid_clear_history(wp->base.grid);
+		return (CMD_RETURN_NORMAL);
+	}
 
 	len = 0;
 	if (args_has(args, 'P'))

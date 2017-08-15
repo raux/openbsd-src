@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile,v 1.130 2016/10/18 02:47:07 tb Exp $
+#	$OpenBSD: Makefile,v 1.134 2017/07/05 10:22:32 espie Exp $
 
 #
 # For more information on building in tricky environments, please see
@@ -71,8 +71,12 @@ build:
 	@false
 .else
 build:
+	umask ${WOBJUMASK}; exec ${MAKE} do-build
+
+do-build:
 .ifdef GLOBAL_AUTOCONF_CACHE
-	cp /dev/null ${GLOBAL_AUTOCONF_CACHE}
+	${INSTALL} -c -o ${BUILDUSER} -g ${WOBJGROUP} -m 664 /dev/null \
+	    ${GLOBAL_AUTOCONF_CACHE}
 .endif
 	@if [[ `id -u` -ne 0 ]]; then \
 		echo $@ must be called by root >&2; \
@@ -82,12 +86,12 @@ build:
 	exec ${MAKE} cleandir
 	exec ${MAKE} includes
 	cd ${.CURDIR}/lib && \
-	    su ${BUILDUSER} -c '${MAKE} depend && exec ${MAKE}' && \
+	    su ${BUILDUSER} -c 'exec ${MAKE}' && \
 	    NOMAN=1 exec ${MAKE} install
 	cd ${.CURDIR}/gnu/lib && \
-	    su ${BUILDUSER} -c '${MAKE} depend && exec ${MAKE}' && \
+	    su ${BUILDUSER} -c 'exec ${MAKE}' && \
 	    NOMAN=1 exec ${MAKE} install
-	su ${BUILDUSER} -c '${MAKE} depend && exec ${MAKE}' && \
+	su ${BUILDUSER} -c 'exec ${MAKE}' && \
 	    exec ${MAKE} install
 	/bin/sh ${.CURDIR}/distrib/sets/makeetcset ${.CURDIR} ${MAKE}
 .endif
@@ -105,6 +109,6 @@ ${CROSS_TARGETS}:
 
 .PHONY: ${CROSS_TARGETS} \
 	build regression-tests includes beforeinstall afterinstall \
-	all depend
+	all depend do-build
 
 .include <bsd.subdir.mk>

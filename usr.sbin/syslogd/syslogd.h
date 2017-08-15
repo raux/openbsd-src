@@ -1,4 +1,4 @@
-/*	$OpenBSD: syslogd.h,v 1.26 2016/10/17 11:19:55 bluhm Exp $ */
+/*	$OpenBSD: syslogd.h,v 1.31 2017/08/08 14:23:23 bluhm Exp $ */
 
 /*
  * Copyright (c) 2003 Anil Madhavapeddy <anil@recoil.org>
@@ -20,6 +20,8 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+#include <stdarg.h>
+
 /* Privilege separation */
 void  priv_init(int, int, int, char **);
 __dead void priv_exec(char *, int, int, int, char **);
@@ -35,7 +37,7 @@ int   priv_getnameinfo(struct sockaddr *, socklen_t, char *, size_t);
 /* Terminal message */
 #define TTYMSGTIME	1		/* timeout used by ttymsg */
 #define TTYMAXDELAY	256		/* max events in ttymsg */
-char *ttymsg(struct iovec *, int, char *);
+void ttymsg(struct iovec *, int, char *);
 
 /* File descriptor send/recv */
 void send_fd(int, int);
@@ -46,11 +48,10 @@ extern int nunix;
 extern char **path_unix;
 extern char *path_ctlsock;
 
-#define MAXLINE		8192		/* maximum line length */
 #define ERRBUFSIZE	256
-void logdebug(const char *, ...) __attribute__((__format__ (printf, 1, 2)));
+void vlogmsg(int pri, const char *, const char *, va_list);
+__dead void die(int);
 extern int Debug;
-extern int Startup;
 
 struct ringbuf {
 	char *buf;

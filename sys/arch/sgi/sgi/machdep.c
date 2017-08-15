@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.153 2016/10/09 11:25:40 tom Exp $ */
+/*	$OpenBSD: machdep.c,v 1.156 2017/04/30 16:45:45 mpi Exp $ */
 
 /*
  * Copyright (c) 2003-2004 Opsycon AB  (www.opsycon.se / www.opsycon.com)
@@ -653,7 +653,7 @@ mips_init(int argc, void *argv, caddr_t boot_esym)
 #ifdef DDB
 	db_machine_init();
 	if (boothowto & RB_KDB)
-		Debugger();
+		db_enter();
 #endif
 
 	/*
@@ -749,7 +749,7 @@ cpu_startup()
 	/*
 	 * Good {morning,afternoon,evening,night}.
 	 */
-	printf(version);
+	printf("%s", version);
 	printf("real mem = %lu (%luMB)\n", ptoa((psize_t)physmem),
 	    ptoa((psize_t)physmem)/1024/1024);
 	printf("rsvd mem = %lu (%luMB)\n", ptoa((psize_t)rsvdmem),
@@ -795,14 +795,8 @@ cpu_startup()
  * Machine dependent system variables.
  */
 int
-cpu_sysctl(name, namelen, oldp, oldlenp, newp, newlen, p)
-	int *name;
-	u_int namelen;
-	void *oldp;
-	size_t *oldlenp;
-	void *newp;
-	size_t newlen;
-	struct proc *p;
+cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
+    size_t newlen, struct proc *p)
 {
 	/* All sysctl names at this level are terminal. */
 	if (namelen != 1)

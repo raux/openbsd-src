@@ -1,4 +1,4 @@
-/*	$OpenBSD: cpu.c,v 1.80 2016/10/21 06:20:58 mlarkin Exp $	*/
+/*	$OpenBSD: cpu.c,v 1.85 2017/06/22 06:21:12 jmatthew Exp $	*/
 /* $NetBSD: cpu.c,v 1.1.2.7 2000/06/26 02:04:05 sommerfeld Exp $ */
 
 /*-
@@ -67,6 +67,7 @@
 #include "lapic.h"
 #include "ioapic.h"
 #include "vmm.h"
+#include "pvbus.h"
 
 #include <sys/param.h>
 #include <sys/timeout.h>
@@ -102,6 +103,10 @@
 #if NIOAPIC > 0
 #include <machine/i82093reg.h>
 #include <machine/i82093var.h>
+#endif
+
+#if NPVBUS > 0
+#include <dev/pv/pvvar.h>
 #endif
 
 #include <dev/ic/mc146818reg.h>
@@ -170,7 +175,6 @@ struct cfdriver cpu_cd = {
 	NULL, "cpu", DV_DULL /* XXX DV_CPU */
 };
 
-#ifndef SMALL_KERNEL
 void	replacesmap(void);
 
 extern int _stac;
@@ -195,7 +199,6 @@ replacesmap(void)
 
 	splx(s);
 }
-#endif /* !SMALL_KERNEL */
 
 int
 cpu_match(struct device *parent, void *match, void *aux)
@@ -385,12 +388,10 @@ cpu_init(struct cpu_info *ci)
 
 	if (ci->ci_feature_sefflags_ebx & SEFF0EBX_SMEP)
 		cr4 |= CR4_SMEP;
-#ifndef SMALL_KERNEL
 	if (ci->ci_feature_sefflags_ebx & SEFF0EBX_SMAP)
 		cr4 |= CR4_SMAP;
 	if (ci->ci_feature_sefflags_ecx & SEFF0ECX_UMIP)
 		cr4 |= CR4_UMIP;
-#endif
 
 	/*
 	 * If we have FXSAVE/FXRESTOR, use them.
@@ -410,7 +411,32 @@ cpu_init(struct cpu_info *ci)
 
 #ifdef MULTIPROCESSOR
 	ci->ci_flags |= CPUF_RUNNING;
-	tlbflushg();
+	/*
+	 * Big hammer: flush all TLB entries, including ones from PTE's
+	 * with the G bit set.  This should only be necessary if TLB
+	 * shootdown falls far behind.
+	 *
+	 * Intel Architecture Software Developer's Manual, Volume 3,
+	 *	System Programming, section 9.10, "Invalidating the
+	 * Translation Lookaside Buffers (TLBS)":
+	 * "The following operations invalidate all TLB entries, irrespective
+	 * of the setting of the G flag:
+	 * ...
+	 * "(P6 family processors only): Writing to control register CR4 to
+	 * modify the PSE, PGE, or PAE flag."
+	 *
+	 * (the alternatives not quoted above are not an option here.)
+	 *
+	 * If PGE is not in use, we reload CR3 for the benefit of
+	 * pre-P6-family processors.
+	 */
+
+	if (cpu_feature & CPUID_PGE) {
+		cr4 = rcr4();
+		lcr4(cr4 & ~CR4_PGE);
+		lcr4(cr4);
+	} else
+		tlbflush();
 #endif
 }
 
@@ -575,7 +601,7 @@ cpu_boot_secondary(struct cpu_info *ci)
 	if (!(ci->ci_flags & CPUF_RUNNING)) {
 		printf("%s failed to become ready\n", ci->ci_dev.dv_xname);
 #ifdef DDB
-		Debugger();
+		db_enter();
 #endif
 	}
 
@@ -603,7 +629,11 @@ cpu_hatch(void *v)
 
 	npxinit(ci);
 
+	ci->ci_curpmap = pmap_kernel();
 	cpu_init(ci);
+#if NPVBUS > 0
+	pvbus_init_cpu();
+#endif
 
 	/* Re-initialise memory range handling on AP */
 	if (mem_range_softc.mr_op != NULL)

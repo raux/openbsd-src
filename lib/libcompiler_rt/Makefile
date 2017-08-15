@@ -1,6 +1,13 @@
-# $OpenBSD: Makefile,v 1.3 2016/09/19 12:19:34 pascal Exp $
+# $OpenBSD: Makefile,v 1.9 2017/08/04 12:00:59 kettenis Exp $
 
 .include <bsd.own.mk>
+
+.if ${COMPILER_VERSION:L} != "clang"
+CC=		clang
+CXX=		clang++
+.endif
+
+.if ${BUILD_CLANG:L} == "yes"
 
 LIB=	compiler_rt
 NOPIC=
@@ -33,6 +40,7 @@ GEN_SRCS=	absvdi2 \
 		ashlti3 \
 		ashrdi3 \
 		ashrti3 \
+		atomic \
 		clear_cache \
 		clzdi2 \
 		clzsi2 \
@@ -57,6 +65,7 @@ GEN_SRCS=	absvdi2 \
 		divti3 \
 		divtf3 \
 		divxc3 \
+		emutls \
 		enable_execute_stack \
 		eprintf \
 		extendsfdf2 \
@@ -164,6 +173,25 @@ SRCS+=	${file}.c
 .	endif
 .endfor
 
+.if ${RTARCH} == "aarch64"
+SRCS+=	comparetf2.c \
+	extenddftf2.c \
+	extendsftf2.c \
+	fixtfdi.c \
+	fixtfsi.c \
+	fixtfti.c \
+	fixunstfdi.c \
+	fixunstfsi.c \
+	fixunstfti.c \
+	floatditf.c \
+	floatsitf.c \
+	floatunsitf.c \
+	floatunditf.c \
+	multc3.c \
+	trunctfdf2.c \
+	trunctfsf2.c
+.endif
+
 .if ${RTARCH} == "arm"
 SRCS+=	aeabi_cdcmp.S \
 	aeabi_cdcmpeq_check_nan.c \
@@ -225,3 +253,8 @@ SRCS+=	divtc3.c \
 .endif
 
 .include <bsd.lib.mk>
+
+.else
+NOPROG=
+.include <bsd.prog.mk>
+.endif

@@ -1,4 +1,4 @@
-/*	$OpenBSD: subr_hibernate.c,v 1.120 2016/09/27 02:53:49 dlg Exp $	*/
+/*	$OpenBSD: subr_hibernate.c,v 1.122 2017/06/22 15:56:29 deraadt Exp $	*/
 
 /*
  * Copyright (c) 2011 Ariane van der Steldt <ariane@stack.nl>
@@ -546,6 +546,17 @@ uvm_page_rle(paddr_t addr)
 }
 
 /*
+ * Calculate a hopefully unique version # for this kernel, based upon
+ * how it was linked.
+ */
+u_int32_t
+hibsum(void)
+{
+	return ((long)malloc ^ (long)km_alloc ^ (long)printf ^ (long)strlen);
+}
+
+
+/*
  * Fills out the hibernate_info union pointed to by hib
  * with information about this machine (swap signature block
  * offsets, number of memory ranges, kernel in use, etc)
@@ -597,6 +608,7 @@ get_hibernate_info(union hibernate_info *hib, int suspend)
 	memset(&hib->kernel_version, 0, 128);
 	bcopy(version, &hib->kernel_version,
 	    min(strlen(version), sizeof(hib->kernel_version)-1));
+	hib->kernel_sum = hibsum();
 
 	if (suspend) {
 		/* Grab the previously-allocated piglet addresses */
@@ -924,6 +936,12 @@ hibernate_compare_signature(union hibernate_info *mine,
 
 	if (strcmp(mine->kernel_version, disk->kernel_version) != 0) {
 		DPRINTF("hibernate kernel version mismatch\n");
+		return (1);
+	}
+
+	if (hibsum() != disk->kernel_sum) {
+		DPRINTF("hibernate sum version mismatch %x %x\n",
+		    hibsum(), disk->kernel_sum);
 		return (1);
 	}
 
@@ -1925,12 +1943,12 @@ hibernate_alloc(void)
 
 	pmap_activate(curproc);
 	pmap_kenter_pa(HIBERNATE_HIBALLOC_PAGE, HIBERNATE_HIBALLOC_PAGE,
-		PROT_READ | PROT_WRITE);
+	    PROT_READ | PROT_WRITE);
 
 	/* Allocate a piglet, store its addresses in the supplied globals */
 	if (uvm_pmr_alloc_piglet(&global_piglet_va, &global_piglet_pa,
 	    HIBERNATE_CHUNK_SIZE * 4, HIBERNATE_CHUNK_SIZE))
-		return (ENOMEM);
+		goto unmap;
 
 	/*
 	 * Allocate VA for the temp page.
@@ -1942,11 +1960,16 @@ hibernate_alloc(void)
 	hibernate_temp_page = (vaddr_t)km_alloc(PAGE_SIZE, &kv_any,
 	    &kp_none, &kd_nowait);
 	if (!hibernate_temp_page) {
-		DPRINTF("out of memory allocating hibernate_temp_page\n");
-		return (ENOMEM);
+		uvm_pmr_free_piglet(global_piglet_va,
+		    4 * HIBERNATE_CHUNK_SIZE);
+		global_piglet_va = 0;
+		goto unmap;
 	}
-
 	return (0);
+unmap:
+	pmap_kremove(HIBERNATE_HIBALLOC_PAGE, PAGE_SIZE);
+	pmap_update(pmap_kernel());
+	return (ENOMEM);
 }
 
 /*

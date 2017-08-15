@@ -1,4 +1,4 @@
-/*	$OpenBSD: constraint.c,v 1.32 2016/09/26 17:17:01 rzalamena Exp $	*/
+/*	$OpenBSD: constraint.c,v 1.35 2016/12/05 10:41:33 rzalamena Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -217,6 +217,7 @@ priv_constraint_msg(u_int32_t id, u_int8_t *data, size_t len, int argc,
 	struct ntp_addr		*h;
 	struct constraint	*cstr;
 	int			 pipes[2];
+	int			 rv;
 
 	if ((cstr = constraint_byid(id)) != NULL) {
 		log_warnx("IMSG_CONSTRAINT_QUERY repeated for id %d", id);
@@ -256,15 +257,18 @@ priv_constraint_msg(u_int32_t id, u_int8_t *data, size_t len, int argc,
 	if (imsg_compose(&cstr->ibuf, IMSG_CONSTRAINT_QUERY, id, 0, -1,
 	    data, len) == -1)
 		fatal("%s: imsg_compose", __func__);
-	if (imsg_flush(&cstr->ibuf) == -1)
-		fatal("%s: imsg_flush", __func__);
+	do {
+		rv = imsg_flush(&cstr->ibuf);
+	} while (rv == -1 && errno == EAGAIN);
+	if (rv == -1)
+		fatal("imsg_flush");
 
 	/*
 	 * Fork child handlers and make sure to do any sensitive work in the
 	 * the (unprivileged) child.  The parent should not do any parsing,
 	 * certificate loading etc.
 	 */
-	start_child(CONSTRAINT_PROC_NAME, pipes[1], argc, argv);
+	cstr->pid = start_child(CONSTRAINT_PROC_NAME, pipes[1], argc, argv);
 }
 
 void
@@ -317,24 +321,20 @@ priv_constraint_readquery(struct constraint *cstr, struct ntp_addr_msg *am,
 void
 priv_constraint_child(const char *pw_dir, uid_t pw_uid, gid_t pw_gid)
 {
-	struct constraint	*cstr;
-	struct ntp_addr_msg	*am;
+	struct constraint	 cstr;
+	struct ntp_addr_msg	 am;
 	uint8_t			*data;
 	static char		 addr[NI_MAXHOST];
 	struct timeval		 rectv, xmttv;
 	struct sigaction	 sa;
 	void			*ctx;
 	struct iovec		 iov[2];
-	int			 i;
+	int			 i, rv;
 
 	log_procinit("constraint");
 
 	if (setpriority(PRIO_PROCESS, 0, 0) == -1)
 		log_warn("could not set priority");
-
-	if ((cstr = calloc(1, sizeof(*cstr))) == NULL ||
-	    (am = calloc(1, sizeof(*am))) == NULL)
-		fatal("%s: calloc", __func__);
 
 	/* Init TLS and load CA certs before chroot() */
 	if (tls_init() == -1)
@@ -364,9 +364,9 @@ priv_constraint_child(const char *pw_dir, uid_t pw_uid, gid_t pw_gid)
 	if (pledge("stdio inet", NULL) == -1)
 		fatal("pledge");
 
-	cstr->fd = CONSTRAINT_PASSFD;
-	imsg_init(&cstr->ibuf, cstr->fd);
-	priv_constraint_readquery(cstr, am, &data);
+	cstr.fd = CONSTRAINT_PASSFD;
+	imsg_init(&cstr.ibuf, cstr.fd);
+	priv_constraint_readquery(&cstr, &am, &data);
 
 	/*
 	 * Get the IP address as name and set the process title accordingly.
@@ -374,8 +374,8 @@ priv_constraint_child(const char *pw_dir, uid_t pw_uid, gid_t pw_gid)
 	 * any DNS operation, so it is safe to be called without the dns
 	 * pledge.
 	 */
-	if (getnameinfo((struct sockaddr *)&cstr->addr->ss,
-	    SA_LEN((struct sockaddr *)&cstr->addr->ss),
+	if (getnameinfo((struct sockaddr *)&cstr.addr->ss,
+	    SA_LEN((struct sockaddr *)&cstr.addr->ss),
 	    addr, sizeof(addr), NULL, 0,
 	    NI_NUMERICHOST) != 0)
 		fatalx("%s getnameinfo", __func__);
@@ -394,21 +394,21 @@ priv_constraint_child(const char *pw_dir, uid_t pw_uid, gid_t pw_gid)
 		fatal("%s fcntl F_SETFD", __func__);
 
 	/* Get remaining data from imsg in the unpriv child */
-	if (am->namelen) {
-		if ((cstr->addr_head.name =
-		    get_string(data, am->namelen)) == NULL)
+	if (am.namelen) {
+		if ((cstr.addr_head.name =
+		    get_string(data, am.namelen)) == NULL)
 			fatalx("invalid IMSG_CONSTRAINT_QUERY name");
-		data += am->namelen;
+		data += am.namelen;
 	}
-	if (am->pathlen) {
-		if ((cstr->addr_head.path =
-		    get_string(data, am->pathlen)) == NULL)
+	if (am.pathlen) {
+		if ((cstr.addr_head.path =
+		    get_string(data, am.pathlen)) == NULL)
 			fatalx("invalid IMSG_CONSTRAINT_QUERY path");
 	}
 
 	/* Run! */
 	if ((ctx = httpsdate_query(addr,
-	    CONSTRAINT_PORT, cstr->addr_head.name, cstr->addr_head.path,
+	    CONSTRAINT_PORT, cstr.addr_head.name, cstr.addr_head.path,
 	    conf->ca, conf->ca_len, &rectv, &xmttv)) == NULL) {
 		/* Abort with failure but without warning */
 		exit(1);
@@ -418,9 +418,11 @@ priv_constraint_child(const char *pw_dir, uid_t pw_uid, gid_t pw_gid)
 	iov[0].iov_len = sizeof(rectv);
 	iov[1].iov_base = &xmttv;
 	iov[1].iov_len = sizeof(xmttv);
-	imsg_composev(&cstr->ibuf,
+	imsg_composev(&cstr.ibuf,
 	    IMSG_CONSTRAINT_RESULT, 0, 0, -1, iov, 2);
-	imsg_flush(&cstr->ibuf);
+	do {
+		rv = imsg_flush(&cstr.ibuf);
+	} while (rv == -1 && errno == EAGAIN);
 
 	/* Tear down the TLS connection after sending the result */
 	httpsdate_free(ctx);

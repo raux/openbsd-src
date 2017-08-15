@@ -1,4 +1,4 @@
-/*	$OpenBSD: systm.h,v 1.119 2016/09/24 18:35:52 tedu Exp $	*/
+/*	$OpenBSD: systm.h,v 1.133 2017/08/11 21:24:20 mpi Exp $	*/
 /*	$NetBSD: systm.h,v 1.50 1996/06/09 04:55:09 briggs Exp $	*/
 
 /*-
@@ -207,6 +207,7 @@ int	copyoutstr(const void *, void *, size_t, size_t *);
 int	copyin(const void *, void *, size_t)
 		__attribute__ ((__bounded__(__buffer__,2,3)));
 int	copyout(const void *, void *, size_t);
+int	copyin32(const uint32_t *, uint32_t *);
 
 void	arc4random_buf(void *, size_t)
 		__attribute__ ((__bounded__(__buffer__,1,2)));
@@ -290,6 +291,33 @@ struct uio;
 int	uiomove(void *, size_t, struct uio *);
 
 #if defined(_KERNEL)
+
+#include <sys/rwlock.h>
+
+extern struct rwlock netlock;
+
+#define	NET_LOCK()							\
+do {									\
+	rw_enter_write(&netlock);					\
+} while (0)
+
+#define	NET_UNLOCK()							\
+do {									\
+	rw_exit_write(&netlock);					\
+} while (0)
+
+#define	NET_ASSERT_LOCKED()						\
+do {									\
+	if (rw_status(&netlock) != RW_WRITE)				\
+		splassert_fail(RW_WRITE, rw_status(&netlock), __func__);\
+} while (0)
+
+#define	NET_ASSERT_UNLOCKED()						\
+do {									\
+	if (rw_status(&netlock) == RW_WRITE)				\
+		splassert_fail(0, rw_status(&netlock), __func__);	\
+} while (0)
+
 __returns_twice int	setjmp(label_t *);
 __dead void	longjmp(label_t *);
 #endif
@@ -306,9 +334,21 @@ extern int (*mountroot)(void);
 
 #include <lib/libkern/libkern.h>
 
-#if defined(DDB) || defined(KGDB)
+#define bzero(b, n)		__builtin_bzero((b), (n))
+#define memcmp(b1, b2, n)	__builtin_memcmp((b1), (b2), (n))
+#define memcpy(d, s, n)		__builtin_memcpy((d), (s), (n))
+#define memset(b, c, n)		__builtin_memset((b), (c), (n))
+#if (defined(__GNUC__) && __GNUC__ >= 4)
+#define memmove(d, s, n)	__builtin_memmove((d), (s), (n))
+#endif
+#if !defined(__clang__) && (defined(__GNUC__) && __GNUC__ >= 4)
+#define bcmp(b1, b2, n)		__builtin_bcmp((b1), (b2), (n))
+#define bcopy(s, d, n)		__builtin_bcopy((s), (d), (n))
+#endif
+
+#if defined(DDB)
 /* debugger entry points */
-void	Debugger(void);	/* in DDB only */
+void	db_enter(void);	/* in DDB only */
 #endif
 
 #ifdef BOOT_CONFIG
@@ -317,12 +357,12 @@ void	user_config(void);
 
 #if defined(MULTIPROCESSOR)
 void	_kernel_lock_init(void);
-void	_kernel_lock(void);
+void	_kernel_lock(const char *, int);
 void	_kernel_unlock(void);
 int	_kernel_lock_held(void);
 
 #define	KERNEL_LOCK_INIT()		_kernel_lock_init()
-#define	KERNEL_LOCK()			_kernel_lock()
+#define	KERNEL_LOCK()			_kernel_lock(__FILE__, __LINE__)
 #define	KERNEL_UNLOCK()			_kernel_unlock()
 #define	KERNEL_ASSERT_LOCKED()		KASSERT(_kernel_lock_held())
 #define	KERNEL_ASSERT_UNLOCKED()	KASSERT(!_kernel_lock_held())

@@ -1,4 +1,120 @@
-.Dd $Mdocdate: November 2 2016 $
+.\"	$OpenBSD: DES_set_key.3,v 1.7 2017/02/09 03:43:05 dtucker Exp $
+.\"	OpenSSL c7497f34 Aug 14 10:50:26 2014 -0400
+.\"
+.\" --------------------------------------------------------------------------
+.\" Major patches to this file were contributed by
+.\" Ulf Moeller <ulf@openssl.org>, Ben Laurie <ben@openssl.org>,
+.\" and Richard Levitte <levitte@openssl.org>.
+.\" --------------------------------------------------------------------------
+.\" Copyright (c) 2000, 2001 The OpenSSL Project.  All rights reserved.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\"
+.\" 1. Redistributions of source code must retain the above copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\"
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in
+.\"    the documentation and/or other materials provided with the
+.\"    distribution.
+.\"
+.\" 3. All advertising materials mentioning features or use of this
+.\"    software must display the following acknowledgment:
+.\"    "This product includes software developed by the OpenSSL Project
+.\"    for use in the OpenSSL Toolkit. (http://www.openssl.org/)"
+.\"
+.\" 4. The names "OpenSSL Toolkit" and "OpenSSL Project" must not be used to
+.\"    endorse or promote products derived from this software without
+.\"    prior written permission. For written permission, please contact
+.\"    openssl-core@openssl.org.
+.\"
+.\" 5. Products derived from this software may not be called "OpenSSL"
+.\"    nor may "OpenSSL" appear in their names without prior written
+.\"    permission of the OpenSSL Project.
+.\"
+.\" 6. Redistributions of any form whatsoever must retain the following
+.\"    acknowledgment:
+.\"    "This product includes software developed by the OpenSSL Project
+.\"    for use in the OpenSSL Toolkit (http://www.openssl.org/)"
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY THE OpenSSL PROJECT ``AS IS'' AND ANY
+.\" EXPRESSED OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+.\" PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL THE OpenSSL PROJECT OR
+.\" ITS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+.\" SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
+.\" NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+.\" LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT,
+.\" STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+.\" ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED
+.\" OF THE POSSIBILITY OF SUCH DAMAGE.
+.\"
+.\" --------------------------------------------------------------------------
+.\" Parts of this file are derived from SSLeay documentation,
+.\" which is covered by the following Copyright and license:
+.\" --------------------------------------------------------------------------
+.\"
+.\" Copyright (C) 1995-1998 Tim Hudson (tjh@cryptsoft.com)
+.\" All rights reserved.
+.\"
+.\" This package is an SSL implementation written
+.\" by Eric Young (eay@cryptsoft.com).
+.\" The implementation was written so as to conform with Netscapes SSL.
+.\"
+.\" This library is free for commercial and non-commercial use as long as
+.\" the following conditions are aheared to.  The following conditions
+.\" apply to all code found in this distribution, be it the RC4, RSA,
+.\" lhash, DES, etc., code; not just the SSL code.  The SSL documentation
+.\" included with this distribution is covered by the same copyright terms
+.\" except that the holder is Tim Hudson (tjh@cryptsoft.com).
+.\"
+.\" Copyright remains Eric Young's, and as such any Copyright notices in
+.\" the code are not to be removed.
+.\" If this package is used in a product, Eric Young should be given
+.\" attribution as the author of the parts of the library used.
+.\" This can be in the form of a textual message at program startup or
+.\" in documentation (online or textual) provided with the package.
+.\"
+.\" Redistribution and use in source and binary forms, with or without
+.\" modification, are permitted provided that the following conditions
+.\" are met:
+.\" 1. Redistributions of source code must retain the copyright
+.\"    notice, this list of conditions and the following disclaimer.
+.\" 2. Redistributions in binary form must reproduce the above copyright
+.\"    notice, this list of conditions and the following disclaimer in the
+.\"    documentation and/or other materials provided with the distribution.
+.\" 3. All advertising materials mentioning features or use of this software
+.\"    must display the following acknowledgement:
+.\"    "This product includes cryptographic software written by
+.\"     Eric Young (eay@cryptsoft.com)"
+.\"    The word 'cryptographic' can be left out if the rouines from the
+.\"    library being used are not cryptographic related :-).
+.\" 4. If you include any Windows specific code (or a derivative thereof)
+.\"    from the apps directory (application code) you must include an
+.\"    acknowledgement: "This product includes software written by
+.\"    Tim Hudson (tjh@cryptsoft.com)"
+.\"
+.\" THIS SOFTWARE IS PROVIDED BY ERIC YOUNG ``AS IS'' AND
+.\" ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+.\" IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+.\" ARE DISCLAIMED.  IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE
+.\" FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+.\" DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+.\" OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+.\" HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+.\" LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+.\" OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+.\" SUCH DAMAGE.
+.\"
+.\" The licence and distribution terms for any publically available version or
+.\" derivative of this code cannot be changed.  i.e. this code cannot simply be
+.\" copied and put under another distribution licence
+.\" [including the GNU Public Licence.]
+.\"
+.Dd $Mdocdate: February 9 2017 $
 .Dt DES_SET_KEY 3
 .Os
 .Sh NAME
@@ -298,10 +414,10 @@ algorithm.
 There are two phases to the use of DES encryption.
 The first is the generation of a
 .Vt DES_key_schedule
-from a key, the second is the actual encryption.
+from a key, and the second is the actual encryption.
 A DES key is of type
 .Vt DES_cblock .
-This type is consists of 8 bytes with odd parity.
+This type consists of 8 bytes with odd parity.
 The least significant bit in each byte is the parity bit.
 The key schedule is an expanded form of the key; it is used to speed the
 encryption process.
@@ -319,7 +435,7 @@ or
 function.
 .Pp
 .Fn DES_set_key_checked
-will check that the key passed is of odd parity and is not a week or
+will check that the key passed is of odd parity and is not a weak or
 semi-weak key.
 If the parity is wrong, then -1 is returned.
 If the key is a weak key, then -2 is returned.
@@ -341,10 +457,10 @@ sets the parity of the passed
 to odd.
 .Pp
 .Fn DES_is_weak_key
-returns 1 is the passed key is a weak key, 0 if it is ok.
+returns 1 if the passed key is a weak key or 0 if it is ok.
 .Pp
 The following routines mostly operate on an input and output stream of
-.Vt DES_cblock Ns s.
+.Vt DES_cblock Ns s .
 .Pp
 .Fn DES_ecb_encrypt
 is the basic DES encryption routine that encrypts or decrypts a single
@@ -362,7 +478,7 @@ argument is non-zero
 .Pq Dv DES_ENCRYPT ,
 the
 .Fa input
-(cleartext) is encrypted in to the
+(cleartext) is encrypted into the
 .Fa output
 (ciphertext) using the key_schedule specified by the
 .Fa schedule
@@ -433,7 +549,7 @@ It uses
 .Fa inw
 and
 .Fa outw
-to 'whiten' the encryption.
+to "whiten" the encryption.
 .Fa inw
 and
 .Fa outw
@@ -463,7 +579,7 @@ Its parameters are the same as
 .Pp
 .Fn DES_cfb_encrypt
 encrypt/decrypts using cipher feedback mode.
-This method takes an array of characters as input and outputs and array
+This method takes an array of characters as input and outputs an array
 of characters.
 It does not require any padding to 8 character groups.
 Note: the
@@ -482,7 +598,7 @@ Because this routine will allow you to encrypt an arbitrary number of
 bytes, no 8 byte padding.
 Each call to this routine will encrypt the input bytes to output and
 then update ivec and num.
-num contains 'how far' we are though ivec.
+num contains "how far" we are though ivec.
 If this does not make much sense, read more about cfb mode of DES :-).
 .Pp
 .Fn DES_ede3_cfb64_encrypt
@@ -494,7 +610,7 @@ except that Triple-DES is used.
 .Pp
 .Fn DES_ofb_encrypt
 encrypts using output feedback mode.
-This method takes an array of characters as input and outputs and array
+This method takes an array of characters as input and outputs an array
 of characters.
 It does not require any padding to 8 character groups.
 Note: the
@@ -521,7 +637,7 @@ The following functions are included in the DES library for
 compatibility with the MIT Kerberos library.
 .Pp
 .Fn DES_cbc_cksum
-produces an 8 byte checksum based on the input stream (via CBC
+produces an 8-byte checksum based on the input stream (via CBC
 encryption).
 The last 4 bytes of the checksum are returned and the complete 8 bytes
 are placed in
@@ -533,7 +649,7 @@ etc. instead.
 .Pp
 .Fn DES_quad_cksum
 is a Kerberos v4 function.
-It returns a 4 byte checksum from the input bytes.
+It returns a 4-byte checksum from the input bytes.
 The algorithm can be iterated over the input, depending on
 .Fa out_count ,
 1, 2, 3 or 4 times.
@@ -604,12 +720,12 @@ for the key schedule and
 .Fa iv
 for the initial vector.
 .Pp
-.Sy Warning:
+.Sy Warning :
 The data format used by
 .Fn DES_enc_write
 and
 .Fn DES_enc_read
-has a cryptographic weakness: When asked to write more than
+has a cryptographic weakness: when asked to write more than
 .Dv MAXWRITE
 bytes,
 .Fn DES_enc_write
@@ -632,7 +748,7 @@ If set to
 DES_cbc_encrypt is used.
 .Sh SEE ALSO
 .Xr crypt 3 ,
-.Xr rand 3
+.Xr RAND_bytes 3
 .Pp
 The
 .Xr evp 3
@@ -655,7 +771,7 @@ were added in OpenSSL 0.9.5.
 .Fn des_init_random_number_generator ,
 .Fn des_new_random_key ,
 .Fn des_set_random_generator_seed ,
-.Xr des_set_sequence_number ,
+.Fn des_set_sequence_number ,
 and
 .Fn des_rand_data 3
 are used in newer versions of Kerberos but are not implemented here.
@@ -669,8 +785,7 @@ prior version 0.9.5, as well as in the original MIT library.
 Single-key DES is insecure due to its short key size.
 ECB mode is not suitable for most applications.
 .Sh BUGS
-.Xr DES_cbc_encrypt 3
-does not modify
+DES_cbc_encrypt does not modify
 .Fa ivec ;
 use
 .Fn DES_ncbc_encrypt
@@ -687,7 +802,7 @@ The second 12 bits will have the low 8 bits taken from the 3rd input
 byte and the top 4 bits taken from the 4th input byte.
 The same holds for output.
 This function has been implemented this way because most people will be
-using a multiple of 8 and because once you get into pulling bytes input
+using a multiple of 8 and because once you get into pulling input
 bytes apart things get ugly!
 .Pp
 .Fn DES_string_to_key

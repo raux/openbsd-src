@@ -1,4 +1,4 @@
-/*	$OpenBSD: status.c,v 1.97 2016/10/18 17:11:43 joris Exp $	*/
+/*	$OpenBSD: status.c,v 1.100 2017/06/01 08:08:24 joris Exp $	*/
 /*
  * Copyright (c) 2006 Joris Vink <joris@openbsd.org>
  * Copyright (c) 2005-2008 Xavier Santolaria <xsa@openbsd.org>
@@ -87,7 +87,7 @@ cvs_status(int argc, char **argv)
 	cr.enterdir = NULL;
 	cr.leavedir = NULL;
 
-	if (current_cvsroot->cr_method == CVS_METHOD_LOCAL) {
+	if (cvsroot_is_local()) {
 		flags |= CR_REPO;
 		cr.fileproc = cvs_status_local;
 	} else {
@@ -106,7 +106,7 @@ cvs_status(int argc, char **argv)
 	else
 		cvs_file_run(1, &arg, &cr);
 
-	if (current_cvsroot->cr_method != CVS_METHOD_LOCAL) {
+	if (cvsroot_is_remote()) {
 		cvs_client_send_files(argv, argc);
 		cvs_client_senddir(".");
 		cvs_client_send_request("status");
@@ -178,8 +178,12 @@ cvs_status_local(struct cvs_file *cf)
 		rcsnum_tostr(cf->file_ent->ce_rev, revbuf, sizeof(revbuf));
 
 		if (cf->file_ent->ce_conflict == NULL) {
-			(void)strlcpy(timebuf, cf->file_ent->ce_time,
-			    sizeof(timebuf));
+			if (cvs_server_active == 0) {
+				(void)strlcpy(timebuf, cf->file_ent->ce_time,
+				    sizeof(timebuf));
+			} else {
+				timebuf[0] = '\0';
+			}
 		} else {
 			len = strlcpy(timebuf, cf->file_ent->ce_conflict,
 			    sizeof(timebuf));
@@ -231,8 +235,13 @@ cvs_status_local(struct cvs_file *cf)
 				    sizeof(buf));
 			} else {
 				rcsnum_tostr(brev, revbuf, sizeof(revbuf));
-				(void)xsnprintf(buf, sizeof(buf),
-				    "(branch: %s)", revbuf);
+				if (RCSNUM_ISBRANCH(brev)) {
+					xsnprintf(buf, sizeof(buf),
+					    "(branch: %s)", revbuf);
+				} else {
+					xsnprintf(buf, sizeof(buf),
+					    "(revision: %s)", revbuf);
+				}
 				free(brev);
 			}
 

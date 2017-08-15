@@ -1,4 +1,4 @@
-/* $OpenBSD: grid-view.c,v 1.26 2016/10/13 20:27:27 nicm Exp $ */
+/* $OpenBSD: grid-view.c,v 1.29 2017/05/12 13:00:56 nicm Exp $ */
 
 /*
  * Copyright (c) 2008 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -45,6 +45,15 @@ grid_view_set_cell(struct grid *gd, u_int px, u_int py,
 	grid_set_cell(gd, grid_view_x(gd, px), grid_view_y(gd, py), gc);
 }
 
+/* Set cells. */
+void
+grid_view_set_cells(struct grid *gd, u_int px, u_int py,
+    const struct grid_cell *gc, const char *s, size_t slen)
+{
+	grid_set_cells(gd, grid_view_x(gd, px), grid_view_y(gd, py), gc, s,
+	    slen);
+}
+
 /* Clear into history. */
 void
 grid_view_clear_history(struct grid *gd, u_int bg)
@@ -87,32 +96,34 @@ grid_view_clear(struct grid *gd, u_int px, u_int py, u_int nx, u_int ny,
 
 /* Scroll region up. */
 void
-grid_view_scroll_region_up(struct grid *gd, u_int rupper, u_int rlower)
+grid_view_scroll_region_up(struct grid *gd, u_int rupper, u_int rlower,
+    u_int bg)
 {
 	if (gd->flags & GRID_HISTORY) {
-		grid_collect_history(gd, 8);
+		grid_collect_history(gd, bg);
 		if (rupper == 0 && rlower == gd->sy - 1)
-			grid_scroll_history(gd, 8);
+			grid_scroll_history(gd, bg);
 		else {
 			rupper = grid_view_y(gd, rupper);
 			rlower = grid_view_y(gd, rlower);
-			grid_scroll_history_region(gd, rupper, rlower);
+			grid_scroll_history_region(gd, rupper, rlower, bg);
 		}
 	} else {
 		rupper = grid_view_y(gd, rupper);
 		rlower = grid_view_y(gd, rlower);
-		grid_move_lines(gd, rupper, rupper + 1, rlower - rupper, 8);
+		grid_move_lines(gd, rupper, rupper + 1, rlower - rupper, bg);
 	}
 }
 
 /* Scroll region down. */
 void
-grid_view_scroll_region_down(struct grid *gd, u_int rupper, u_int rlower)
+grid_view_scroll_region_down(struct grid *gd, u_int rupper, u_int rlower,
+    u_int bg)
 {
 	rupper = grid_view_y(gd, rupper);
 	rlower = grid_view_y(gd, rlower);
 
-	grid_move_lines(gd, rupper + 1, rupper, rlower - rupper, 8);
+	grid_move_lines(gd, rupper + 1, rupper, rlower - rupper, bg);
 }
 
 /* Insert lines. */
@@ -185,7 +196,7 @@ grid_view_insert_cells(struct grid *gd, u_int px, u_int py, u_int nx, u_int bg)
 
 	sx = grid_view_x(gd, gd->sx);
 
-	if (px == sx - 1)
+	if (px >= sx - 1)
 		grid_clear(gd, px, py, 1, 1, bg);
 	else
 		grid_move_cells(gd, px + nx, px, py, sx - px - nx, bg);

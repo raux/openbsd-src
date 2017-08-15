@@ -1,4 +1,4 @@
-/*	$OpenBSD: pmap.c,v 1.102 2016/09/17 07:37:57 mlarkin Exp $	*/
+/*	$OpenBSD: pmap.c,v 1.105 2017/07/24 15:31:14 robert Exp $	*/
 /*	$NetBSD: pmap.c,v 1.3 2003/05/08 18:13:13 thorpej Exp $	*/
 
 /*
@@ -114,7 +114,6 @@
 
 #include <uvm/uvm.h>
 
-#include <machine/lock.h>
 #include <machine/cpu.h>
 #include <machine/specialreg.h>
 #ifdef MULTIPROCESSOR
@@ -288,7 +287,9 @@ int pmap_find_pte_direct(struct pmap *pm, vaddr_t va, pt_entry_t **pd, int *offs
 void pmap_free_ptp(struct pmap *, struct vm_page *,
     vaddr_t, pt_entry_t *, pd_entry_t **, struct pg_to_free *);
 void pmap_freepage(struct pmap *, struct vm_page *, int, struct pg_to_free *);
+#ifdef MULTIPROCESSOR
 static boolean_t pmap_is_active(struct pmap *, int);
+#endif
 void pmap_map_ptes(struct pmap *, pt_entry_t **, pd_entry_t ***, paddr_t *);
 struct pv_entry *pmap_remove_pv(struct vm_page *, struct pmap *, vaddr_t);
 void pmap_do_remove(struct pmap *, vaddr_t, vaddr_t, int);
@@ -336,12 +337,14 @@ pmap_is_curpmap(struct pmap *pmap)
  * pmap_is_active: is this pmap loaded into the specified processor's %cr3?
  */
 
+#ifdef MULTIPROCESSOR
 static __inline boolean_t
 pmap_is_active(struct pmap *pmap, int cpu_id)
 {
 	return (pmap == pmap_kernel() ||
 	    (pmap->pm_cpus & (1ULL << cpu_id)) != 0);
 }
+#endif
 
 static __inline u_int
 pmap_pte2flags(u_long pte)
@@ -2320,11 +2323,6 @@ pmap_growkernel(vaddr_t maxkvaddr)
 			       &kpm->pm_pdir[PDIR_SLOT_KERN + old],
 			       newpdes * sizeof (pd_entry_t));
 		}
-
-		/* Invalidate the PDP cache. */
-#if 0
-		pool_cache_invalidate(&pmap_pdp_cache);
-#endif
 	}
 	pmap_maxkvaddr = maxkvaddr;
 	splx(s);
@@ -2478,7 +2476,7 @@ pmap_tlb_shootpage(struct pmap *pm, vaddr_t va, int shootself)
 
 		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
 			while (tlb_shoot_wait != 0)
-				SPINLOCK_SPIN_HOOK;
+				CPU_BUSY_CYCLE();
 		}
 		tlb_shoot_addr1 = va;
 		CPU_INFO_FOREACH(cii, ci) {
@@ -2516,7 +2514,7 @@ pmap_tlb_shootrange(struct pmap *pm, vaddr_t sva, vaddr_t eva, int shootself)
 
 		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
 			while (tlb_shoot_wait != 0)
-				SPINLOCK_SPIN_HOOK;
+				CPU_BUSY_CYCLE();
 		}
 		tlb_shoot_addr1 = sva;
 		tlb_shoot_addr2 = eva;
@@ -2554,7 +2552,7 @@ pmap_tlb_shoottlb(struct pmap *pm, int shootself)
 
 		while (atomic_cas_ulong(&tlb_shoot_wait, 0, wait) != 0) {
 			while (tlb_shoot_wait != 0)
-				SPINLOCK_SPIN_HOOK;
+				CPU_BUSY_CYCLE();
 		}
 
 		CPU_INFO_FOREACH(cii, ci) {
@@ -2574,7 +2572,7 @@ void
 pmap_tlb_shootwait(void)
 {
 	while (tlb_shoot_wait != 0)
-		SPINLOCK_SPIN_HOOK;
+		CPU_BUSY_CYCLE();
 }
 
 #else

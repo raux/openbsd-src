@@ -1,4 +1,4 @@
-/* $OpenBSD: channels.h,v 1.120 2016/10/18 17:32:54 dtucker Exp $ */
+/* $OpenBSD: channels.h,v 1.126 2017/05/30 14:23:52 markus Exp $ */
 
 /*
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
@@ -46,8 +46,6 @@
 #define SSH_CHANNEL_CLOSED		5	/* waiting for close confirmation */
 #define SSH_CHANNEL_AUTH_SOCKET		6	/* authentication socket */
 #define SSH_CHANNEL_X11_OPEN		7	/* reading first X11 packet */
-#define SSH_CHANNEL_INPUT_DRAINING	8	/* sending remaining data to conn */
-#define SSH_CHANNEL_OUTPUT_DRAINING	9	/* sending remaining data to app */
 #define SSH_CHANNEL_LARVAL		10	/* larval session */
 #define SSH_CHANNEL_RPORT_LISTENER	11	/* Listening to a R-style port  */
 #define SSH_CHANNEL_CONNECTING		12
@@ -63,6 +61,7 @@
 
 #define CHANNEL_CANCEL_PORT_STATIC	-1
 
+struct ssh;
 struct Channel;
 typedef struct Channel Channel;
 
@@ -197,11 +196,11 @@ struct Channel {
 
 /* check whether 'efd' is still in use */
 #define CHANNEL_EFD_INPUT_ACTIVE(c) \
-	(compat20 && c->extended_usage == CHAN_EXTENDED_READ && \
+	(c->extended_usage == CHAN_EXTENDED_READ && \
 	(c->efd != -1 || \
 	buffer_len(&c->extended) > 0))
 #define CHANNEL_EFD_OUTPUT_ACTIVE(c) \
-	(compat20 && c->extended_usage == CHAN_EXTENDED_WRITE && \
+	(c->extended_usage == CHAN_EXTENDED_WRITE && \
 	c->efd != -1 && (!(c->flags & (CHAN_EOF_RCVD|CHAN_CLOSE_RCVD)) || \
 	buffer_len(&c->extended) > 0))
 
@@ -231,21 +230,19 @@ void	 channel_send_window_changes(void);
 /* mux proxy support */
 
 int	 channel_proxy_downstream(Channel *mc);
-int	 channel_proxy_upstream(Channel *, int, u_int32_t, void *);
+int	 channel_proxy_upstream(Channel *, int, u_int32_t, struct ssh *);
 
 /* protocol handler */
 
-int	 channel_input_close(int, u_int32_t, void *);
-int	 channel_input_close_confirmation(int, u_int32_t, void *);
-int	 channel_input_data(int, u_int32_t, void *);
-int	 channel_input_extended_data(int, u_int32_t, void *);
-int	 channel_input_ieof(int, u_int32_t, void *);
-int	 channel_input_oclose(int, u_int32_t, void *);
-int	 channel_input_open_confirmation(int, u_int32_t, void *);
-int	 channel_input_open_failure(int, u_int32_t, void *);
-int	 channel_input_port_open(int, u_int32_t, void *);
-int	 channel_input_window_adjust(int, u_int32_t, void *);
-int	 channel_input_status_confirm(int, u_int32_t, void *);
+int	 channel_input_data(int, u_int32_t, struct ssh *);
+int	 channel_input_extended_data(int, u_int32_t, struct ssh *);
+int	 channel_input_ieof(int, u_int32_t, struct ssh *);
+int	 channel_input_oclose(int, u_int32_t, struct ssh *);
+int	 channel_input_open_confirmation(int, u_int32_t, struct ssh *);
+int	 channel_input_open_failure(int, u_int32_t, struct ssh *);
+int	 channel_input_port_open(int, u_int32_t, struct ssh *);
+int	 channel_input_window_adjust(int, u_int32_t, struct ssh *);
+int	 channel_input_status_confirm(int, u_int32_t, struct ssh *);
 
 /* file descriptor handling (read/write) */
 
@@ -272,7 +269,8 @@ void	 channel_update_permitted_opens(int, int);
 void	 channel_clear_permitted_opens(void);
 void	 channel_clear_adm_permitted_opens(void);
 void 	 channel_print_adm_permitted_opens(void);
-Channel	*channel_connect_to_port(const char *, u_short, char *, char *);
+Channel	*channel_connect_to_port(const char *, u_short, char *, char *, int *,
+	     const char **);
 Channel *channel_connect_to_path(const char *, char *, char *);
 Channel	*channel_connect_stdio_fwd(const char*, u_short, int, int);
 Channel	*channel_connect_by_listen_address(const char *, u_short,
@@ -291,14 +289,8 @@ int	 permitopen_port(const char *);
 void	 channel_set_x11_refuse_time(u_int);
 int	 x11_connect_display(void);
 int	 x11_create_display_inet(int, int, int, u_int *, int **);
-int      x11_input_open(int, u_int32_t, void *);
 void	 x11_request_forwarding_with_spoofing(int, const char *, const char *,
 	     const char *, int);
-int	 deny_input_open(int, u_int32_t, void *);
-
-/* agent forwarding */
-
-void	 auth_request_forwarding(void);
 
 /* channel close */
 

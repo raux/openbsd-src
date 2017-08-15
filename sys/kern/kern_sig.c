@@ -1,4 +1,4 @@
-/*	$OpenBSD: kern_sig.c,v 1.206 2016/10/05 02:31:52 guenther Exp $	*/
+/*	$OpenBSD: kern_sig.c,v 1.212 2017/06/08 17:14:02 bluhm Exp $	*/
 /*	$NetBSD: kern_sig.c,v 1.54 1996/04/22 01:38:32 christos Exp $	*/
 
 /*
@@ -63,15 +63,13 @@
 #include <sys/user.h>
 #include <sys/syslog.h>
 #include <sys/pledge.h>
+#include <sys/witness.h>
 
 #include <sys/mount.h>
 #include <sys/syscallargs.h>
 
 #include <uvm/uvm_extern.h>
-
-#ifdef  __HAVE_MD_TCB
-# include <machine/tcb.h>
-#endif
+#include <machine/tcb.h>
 
 int	filt_sigattach(struct knote *kn);
 void	filt_sigdetach(struct knote *kn);
@@ -617,7 +615,7 @@ sys_thrkill(struct proc *cp, void *v, register_t *retval)
 	if (((u_int)signum) >= NSIG)
 		return (EINVAL);
 	if (tid > THREAD_PID_OFFSET) {
-		if ((p = pfind(tid - THREAD_PID_OFFSET)) == NULL)
+		if ((p = tfind(tid - THREAD_PID_OFFSET)) == NULL)
 			return (ESRCH);
 
 		/* can only kill threads in the same process */
@@ -649,7 +647,7 @@ killpg1(struct proc *cp, int signum, int pgid, int all)
 	struct pgrp *pgrp;
 	int nfound = 0;
 
-	if (all)
+	if (all) {
 		/* 
 		 * broadcast
 		 */
@@ -662,7 +660,7 @@ killpg1(struct proc *cp, int signum, int pgid, int all)
 			if (signum)
 				prsignal(pr, signum);
 		}
-	else {
+	} else {
 		if (pgid == 0)
 			/*
 			 * zero pgid means send to my process group.
@@ -760,6 +758,14 @@ trapsignal(struct proc *p, int signum, u_long trapno, int code,
 	struct process *pr = p->p_p;
 	struct sigacts *ps = pr->ps_sigacts;
 	int mask;
+
+	switch (signum) {
+	case SIGILL:
+	case SIGBUS:
+	case SIGSEGV:
+		pr->ps_acflag |= ATRAP;
+		break;
+	}
 
 	mask = sigmask(signum);
 	if ((pr->ps_flags & PS_TRACED) == 0 &&
@@ -1511,12 +1517,12 @@ coredump(struct proc *p)
 		 * that core will silently fail.
 		 */
 		len = snprintf(name, sizeof(name), "%s/%s/%u.core",
-		    dir, p->p_comm, pr->ps_pid);
+		    dir, pr->ps_comm, pr->ps_pid);
 	} else if (incrash && nosuidcoredump == 2)
 		len = snprintf(name, sizeof(name), "%s/%s.core",
-		    dir, p->p_comm);
+		    dir, pr->ps_comm);
 	else
-		len = snprintf(name, sizeof(name), "%s.core", p->p_comm);
+		len = snprintf(name, sizeof(name), "%s.core", pr->ps_comm);
 	if (len >= sizeof(name))
 		return (EACCES);
 
@@ -1611,12 +1617,13 @@ coredump_write(void *cookie, enum uio_seg segflg, const void *data, size_t len)
 		    io->io_offset + coffset, segflg,
 		    IO_UNIT, io->io_cred, NULL, io->io_proc);
 		if (error) {
+			struct process *pr = io->io_proc->p_p;
 			if (error == ENOSPC)
 				log(LOG_ERR, "coredump of %s(%d) failed, filesystem full\n",
-				    io->io_proc->p_comm, io->io_proc->p_p->ps_pid);
+				    pr->ps_comm, pr->ps_pid);
 			else
 				log(LOG_ERR, "coredump of %s(%d), write failed: errno %d\n",
-				    io->io_proc->p_comm, io->io_proc->p_p->ps_pid, error);
+				    pr->ps_comm, pr->ps_pid, error);
 			return (error);
 		}
 
@@ -1847,6 +1854,8 @@ userret(struct proc *p)
 		single_thread_check(p, 0);
 		KERNEL_UNLOCK();
 	}
+
+	WITNESS_WARN(WARN_PANIC, NULL, "userret: returning");
 
 	p->p_cpu->ci_schedstate.spc_curpriority = p->p_priority = p->p_usrpri;
 }

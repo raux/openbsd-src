@@ -1,4 +1,4 @@
-/* $OpenBSD: simplebus.c,v 1.10 2016/10/05 07:44:24 patrick Exp $ */
+/* $OpenBSD: simplebus.c,v 1.13 2017/04/27 22:41:46 kettenis Exp $ */
 /*
  * Copyright (c) 2016 Patrick Wildt <patrick@blueri.se>
  *
@@ -25,6 +25,7 @@
 #include <dev/ofw/fdt.h>
 
 #include <arm/fdt.h>
+#include <arm/simplebus/simplebusvar.h>
 
 int simplebus_match(struct device *, void *, void *);
 void simplebus_attach(struct device *, struct device *, void *);
@@ -32,24 +33,8 @@ void simplebus_attach(struct device *, struct device *, void *);
 void simplebus_attach_node(struct device *, int);
 int simplebus_bs_map(void *, uint64_t, bus_size_t, int, bus_space_handle_t *);
 
-struct simplebus_softc {
-	struct device		 sc_dev;
-	int			 sc_node;
-	bus_space_tag_t		 sc_iot;
-	bus_dma_tag_t		 sc_dmat;
-	int			 sc_acells;
-	int			 sc_scells;
-	int			 sc_pacells;
-	int			 sc_pscells;
-	struct bus_space	 sc_bus;
-	int			*sc_ranges;
-	int			 sc_rangeslen;
-	int			 sc_early;
-};
-
 struct cfattach simplebus_ca = {
-	sizeof(struct simplebus_softc), simplebus_match, simplebus_attach, NULL,
-	config_activate_children
+	sizeof(struct simplebus_softc), simplebus_match, simplebus_attach
 };
 
 struct cfdriver simplebus_cd = {
@@ -111,11 +96,11 @@ simplebus_attach(struct device *parent, struct device *self, void *aux)
 
 	/* Scan the whole tree. */
 	sc->sc_early = 1;
-	for (node = OF_child(sc->sc_node); node; node = OF_peer(node)) 
+	for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
 		simplebus_attach_node(self, node);
 
 	sc->sc_early = 0;
-	for (node = OF_child(sc->sc_node); node; node = OF_peer(node)) 
+	for (node = OF_child(sc->sc_node); node; node = OF_peer(node))
 		simplebus_attach_node(self, node);
 }
 
@@ -138,16 +123,16 @@ simplebus_attach_node(struct device *self, int node)
 {
 	struct simplebus_softc	*sc = (struct simplebus_softc *)self;
 	struct fdt_attach_args	 fa;
-	char			 buffer[128];
+	char			 buf[32];
 	int			 i, len, line;
 	uint32_t		*cell, *reg;
 
-	if (!OF_getprop(node, "compatible", buffer, sizeof(buffer)))
+	if (OF_getproplen(node, "compatible") <= 0)
 		return;
 
-	if (OF_getprop(node, "status", buffer, sizeof(buffer)))
-		if (!strcmp(buffer, "disabled"))
-			return;
+	if (OF_getprop(node, "status", buf, sizeof(buf)) > 0 &&
+	    strcmp(buf, "disabled") == 0)
+		return;
 
 	memset(&fa, 0, sizeof(fa));
 	fa.fa_name = "";

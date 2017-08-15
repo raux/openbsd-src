@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.h,v 1.71 2016/10/28 09:07:08 rzalamena Exp $	*/
+/*	$OpenBSD: snmpd.h,v 1.76 2017/07/28 13:17:43 florian Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -401,9 +401,13 @@ struct pfr_buffer {
 #define MSG_REPORT(m)		(((m)->sm_flags & SNMP_MSGFLAG_REPORT) != 0)
 
 struct snmp_message {
+	int			 sm_sock;
 	struct sockaddr_storage	 sm_ss;
 	socklen_t		 sm_slen;
 	char			 sm_host[HOST_NAME_MAX+1];
+
+	struct sockaddr_storage	 sm_local_ss;
+	socklen_t		 sm_local_slen;
 
 	struct ber		 sm_ber;
 	struct ber_element	*sm_req;
@@ -434,7 +438,7 @@ struct snmp_message {
 	long long		 sm_secmodel;
 	u_int32_t		 sm_engine_boots;
 	u_int32_t		 sm_engine_time;
-	char			 sm_ctxengineid[SNMPD_MAXENGINEIDLEN];
+	uint8_t			 sm_ctxengineid[SNMPD_MAXENGINEIDLEN];
 	size_t			 sm_ctxengineid_len;
 	char			 sm_ctxname[SNMPD_MAXCONTEXNAMELEN+1];
 
@@ -511,8 +515,16 @@ struct address {
 	/* For SNMP trap receivers etc. */
 	char			*sa_community;
 	struct ber_oid		*sa_oid;
+	struct address		*sa_srcaddr;
 };
 TAILQ_HEAD(addresslist, address);
+
+struct listen_sock {
+	int				s_fd;
+	struct event			s_ev;
+	TAILQ_ENTRY(listen_sock)	entry;
+};
+TAILQ_HEAD(socklist, listen_sock);
 
 enum usmauth {
 	AUTH_NONE = 0,
@@ -549,12 +561,12 @@ struct usmuser {
 struct snmpd {
 	u_int8_t		 sc_flags;
 #define SNMPD_F_VERBOSE		 0x01
-#define SNMPD_F_NONAMES		 0x02
+#define SNMPD_F_DEBUG		 0x02
+#define SNMPD_F_NONAMES		 0x04
 
 	const char		*sc_confpath;
-	struct address		 sc_address;
-	int			 sc_sock;
-	struct event		 sc_ev;
+	struct addresslist	 sc_addresses;
+	struct socklist		 sc_sockets;
 	struct timeval		 sc_starttime;
 	u_int32_t		 sc_engine_boots;
 
@@ -562,7 +574,7 @@ struct snmpd {
 	char			 sc_rwcommunity[SNMPD_MAXCOMMUNITYLEN];
 	char			 sc_trcommunity[SNMPD_MAXCOMMUNITYLEN];
 
-	char			 sc_engineid[SNMPD_MAXENGINEIDLEN];
+	uint8_t			 sc_engineid[SNMPD_MAXENGINEIDLEN];
 	size_t			 sc_engineid_len;
 
 	struct snmp_stats	 sc_stats;
@@ -607,7 +619,8 @@ int		 cmdline_symset(char *);
 /* log.c */
 void	log_init(int, int);
 void	log_procinit(const char *);
-void	log_verbose(int);
+void	log_setverbose(int);
+int	log_getverbose(void);
 void	log_warn(const char *, ...)
 	    __attribute__((__format__ (printf, 1, 2)));
 void	log_warnx(const char *, ...)
@@ -787,6 +800,10 @@ struct trapcmd *
 /* util.c */
 int	 varbind_convert(struct agentx_pdu *, struct agentx_varbind_hdr *,
 	    struct ber_element **, struct ber_element **);
+ssize_t	 sendtofrom(int, void *, size_t, int, struct sockaddr *,
+	    socklen_t, struct sockaddr *, socklen_t);
+ssize_t	 recvfromto(int, void *, size_t, int, struct sockaddr *,
+	    socklen_t *, struct sockaddr *, socklen_t *);
 void	 print_debug(const char *, ...);
 void	 print_verbose(const char *, ...);
 const char *log_in6addr(const struct in6_addr *);

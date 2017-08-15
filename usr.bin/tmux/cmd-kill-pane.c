@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-kill-pane.c,v 1.22 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-kill-pane.c,v 1.25 2017/04/22 10:22:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -35,7 +35,7 @@ const struct cmd_entry cmd_kill_pane_entry = {
 	.args = { "at:", 0, 0 },
 	.usage = "[-a] " CMD_TARGET_PANE_USAGE,
 
-	.tflag = CMD_PANE,
+	.target = { 't', CMD_FIND_PANE, 0 },
 
 	.flags = 0,
 	.exec = cmd_kill_pane_exec
@@ -44,17 +44,10 @@ const struct cmd_entry cmd_kill_pane_entry = {
 static enum cmd_retval
 cmd_kill_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
-	struct winlink		*wl = item->state.tflag.wl;
-	struct window_pane	*loopwp, *tmpwp, *wp = item->state.tflag.wp;
+	struct winlink		*wl = item->target.wl;
+	struct window_pane	*loopwp, *tmpwp, *wp = item->target.wp;
 
 	server_unzoom_window(wl->window);
-
-	if (window_count_panes(wl->window) == 1) {
-		/* Only one pane, kill the window. */
-		server_kill_window(wl->window);
-		recalculate_sizes();
-		return (CMD_RETURN_NORMAL);
-	}
 
 	if (args_has(self->args, 'a')) {
 		TAILQ_FOREACH_SAFE(loopwp, &wl->window->panes, entry, tmpwp) {
@@ -63,11 +56,17 @@ cmd_kill_pane_exec(struct cmd *self, struct cmdq_item *item)
 			layout_close_pane(loopwp);
 			window_remove_pane(wl->window, loopwp);
 		}
+		server_redraw_window(wl->window);
+		return (CMD_RETURN_NORMAL);
+	}
+
+	if (window_count_panes(wl->window) == 1) {
+		server_kill_window(wl->window);
+		recalculate_sizes();
 	} else {
 		layout_close_pane(wp);
 		window_remove_pane(wl->window, wp);
+		server_redraw_window(wl->window);
 	}
-	server_redraw_window(wl->window);
-
 	return (CMD_RETURN_NORMAL);
 }

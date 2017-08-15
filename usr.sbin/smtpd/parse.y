@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.190 2016/09/12 07:33:00 eric Exp $	*/
+/*	$OpenBSD: parse.y,v 1.197 2017/07/11 06:08:40 natano Exp $	*/
 
 /*
  * Copyright (c) 2008 Gilles Chehade <gilles@poolp.org>
@@ -93,6 +93,7 @@ char		*symget(const char *);
 
 struct smtpd		*conf = NULL;
 static int		 errors = 0;
+static uint64_t		 ruleid = 0;
 
 struct filter_conf	*filter = NULL;
 struct table		*table = NULL;
@@ -151,10 +152,6 @@ void		 set_localaddrs(struct table *);
 int		 delaytonum(char *);
 int		 is_if_in_group(const char *, const char *);
 
-static struct filter_conf *create_filter_proc(char *, char *);
-static struct filter_conf *create_filter_chain(char *);
-static int add_filter_arg(struct filter_conf *, char *);
-
 static int config_lo_filter(struct listen_opts *, char *);
 static int config_lo_mask_source(struct listen_opts *);
 
@@ -172,7 +169,7 @@ typedef struct {
 %}
 
 %token	AS QUEUE COMPRESSION ENCRYPTION MAXMESSAGESIZE MAXMTADEFERRED LISTEN ON ANY PORT EXPIRE
-%token	TABLE SECURE SMTPS CERTIFICATE DOMAIN BOUNCEWARN LIMIT INET4 INET6 NODSN SESSION
+%token	TABLE SMTPS CERTIFICATE DOMAIN BOUNCEWARN LIMIT INET4 INET6 NODSN SESSION
 %token  RELAY BACKUP VIA DELIVER TO LMTP MAILDIR MBOX RCPTTO HOSTNAME HOSTNAMES
 %token	ACCEPT REJECT INCLUDE ERROR MDA FROM FOR SOURCE MTA PKI SCHEDULER
 %token	ARROW AUTH TLS LOCAL VIRTUAL TAG TAGGED ALIAS FILTER KEY CA DHE
@@ -271,8 +268,9 @@ tagged		: TAGGED negation STRING       		{
 		}
 		;
 
-authenticated  	: AUTHENTICATED	{
+authenticated  	: negation AUTHENTICATED	{
 			rule->r_wantauth = 1;
+			rule->r_negwantauth = $1;
 		}
 		;
 
@@ -516,14 +514,6 @@ opt_if_listen : INET4 {
 			}
 			listen_opts.options |= LO_SSL;
 			listen_opts.ssl = F_STARTTLS;
-		}
-		| SECURE       			{
-			if (listen_opts.options & LO_SSL) {
-				yyerror("TLS mode already specified");
-				YYERROR;
-			}
-			listen_opts.options |= LO_SSL;
-			listen_opts.ssl = F_SSL;
 		}
 		| TLS_REQUIRE			{
 			if (listen_opts.options & LO_SSL) {
@@ -920,22 +910,6 @@ main		: BOUNCEWARN {
 			listen_opts.family = AF_UNSPEC;
 			listen_opts.flags |= F_EXT_DSN;
 		} ON listener_type
-		| FILTER STRING STRING {
-			if (!strcmp($3, "chain")) {
-				free($3);
-				if ((filter = create_filter_chain($2)) == NULL) {
-					free($2);
-					YYERROR;
-				}
-			}
-			else {
-				if ((filter = create_filter_proc($2, $3)) == NULL) {
-					free($2);
-					free($3);
-					YYERROR;
-				}
-			}
-		} filter_args
 		| PKI STRING	{
 			char buf[HOST_NAME_MAX+1];
 
@@ -979,15 +953,6 @@ main		: BOUNCEWARN {
 		| CIPHERS STRING {
 			conf->sc_tls_ciphers = $2;
 		}
-		;
-
-filter_args	:
-		| STRING {
-			if (!add_filter_arg(filter, $1)) {
-				free($1);
-				YYERROR;
-			}
-		} filter_args
 		;
 
 table		: TABLE STRING STRING	{
@@ -1409,6 +1374,7 @@ accept_params	: opt_accept accept_params
 
 rule		: ACCEPT {
 			rule = xcalloc(1, sizeof(*rule), "parse rule: ACCEPT");
+			rule->r_id = ++ruleid;
 			rule->r_action = A_NONE;
 			rule->r_decision = R_ACCEPT;
 			rule->r_desttype = DEST_DOM;
@@ -1441,6 +1407,7 @@ rule		: ACCEPT {
 		}
 		| REJECT {
 			rule = xcalloc(1, sizeof(*rule), "parse rule: REJECT");
+			rule->r_id = ++ruleid;
 			rule->r_decision = R_REJECT;
 			rule->r_desttype = DEST_DOM;
 		} decision {
@@ -1537,7 +1504,6 @@ lookup(char *s)
 		{ "reject",		REJECT },
 		{ "relay",		RELAY },
 		{ "scheduler",		SCHEDULER },
-		{ "secure",		SECURE },
 		{ "sender",    		SENDER },
 		{ "senders",   		SENDERS },
 		{ "session",   		SESSION },
@@ -2008,8 +1974,7 @@ parse_config(struct smtpd *x_conf, const char *filename, int opts)
 	}
 
 	/* Free macros and check which have not been used. */
-	for (sym = TAILQ_FIRST(&symhead); sym != NULL; sym = next) {
-		next = TAILQ_NEXT(sym, entry);
+	TAILQ_FOREACH_SAFE(sym, &symhead, entry, next) {
 		if ((conf->sc_opts & SMTPD_OPT_VERBOSE) && !sym->used)
 			fprintf(stderr, "warning: macro '%s' not "
 			    "used\n", sym->nam);
@@ -2039,9 +2004,10 @@ symset(const char *nam, const char *val, int persist)
 {
 	struct sym	*sym;
 
-	for (sym = TAILQ_FIRST(&symhead); sym && strcmp(nam, sym->nam);
-	    sym = TAILQ_NEXT(sym, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(sym, &symhead, entry) {
+		if (strcmp(nam, sym->nam) == 0)
+			break;
+	}
 
 	if (sym != NULL) {
 		if (sym->persist == 1)
@@ -2100,11 +2066,12 @@ symget(const char *nam)
 {
 	struct sym	*sym;
 
-	TAILQ_FOREACH(sym, &symhead, entry)
+	TAILQ_FOREACH(sym, &symhead, entry) {
 		if (strcmp(nam, sym->nam) == 0) {
 			sym->used = 1;
 			return (sym->val);
 		}
+	}
 	return (NULL);
 }
 
@@ -2177,13 +2144,8 @@ config_listener(struct listener *h,  struct listen_opts *lo)
 	if (lo->hostname == NULL)
 		lo->hostname = conf->sc_hostname;
 
-	if (lo->filtername) {
-		if (dict_get(&conf->sc_filters, lo->filtername) == NULL) {
-			log_warnx("undefined filter: %s", lo->filtername);
-			fatalx(NULL);
-		}
+	if (lo->filtername)
 		(void)strlcpy(h->filter, lo->filtername, sizeof(h->filter));
-	}
 
 	h->pki_name[0] = '\0';
 
@@ -2225,6 +2187,9 @@ config_listener(struct listener *h,  struct listen_opts *lo)
 	if (lo->ssl & F_TLS_VERIFY)
 		h->flags |= F_TLS_VERIFY;
 
+	if (lo->ssl & F_STARTTLS_REQUIRE)
+		h->flags |= F_STARTTLS_REQUIRE;
+	
 	if (h != conf->sc_sock_listener)
 		TAILQ_INSERT_TAIL(conf->sc_listeners, h, entry);
 }
@@ -2549,82 +2514,6 @@ is_if_in_group(const char *ifname, const char *groupname)
 end:
 	close(s);
 	return ret;
-}
-
-static struct filter_conf *
-create_filter_proc(char *name, char *prog)
-{
-	struct filter_conf	*f;
-	char			*path;
-
-	if (dict_get(&conf->sc_filters, name)) {
-		yyerror("filter \"%s\" already defined", name);
-		return (NULL);
-	}
-
-	if (asprintf(&path, "%s/filter-%s", PATH_LIBEXEC, prog) == -1) {
-		yyerror("filter \"%s\" asprintf failed", name);
-		return (0);
-	}
-
-	f = xcalloc(1, sizeof(*f), "create_filter");
-	f->path = path;
-	f->name = name;
-	f->argv[f->argc++] = name;
-
-	dict_xset(&conf->sc_filters, name, f);
-
-	return (f);
-}
-
-static struct filter_conf *
-create_filter_chain(char *name)
-{
-	struct filter_conf	*f;
-
-	if (dict_get(&conf->sc_filters, name)) {
-		yyerror("filter \"%s\" already defined", name);
-		return (NULL);
-	}
-
-	f = xcalloc(1, sizeof(*f), "create_filter_chain");
-	f->chain = 1;
-	f->name = name;
-
-	dict_xset(&conf->sc_filters, name, f);
-
-	return (f);
-}
-
-static int
-add_filter_arg(struct filter_conf *f, char *arg)
-{
-	int	i;
-
-	if (f->argc == MAX_FILTER_ARGS) {
-		yyerror("filter \"%s\" is full", f->name);
-		return (0);
-	}
-
-	if (f->chain) {
-		if (dict_get(&conf->sc_filters, arg) == NULL) {
-			yyerror("undefined filter \"%s\"", arg);
-			return (0);
-		}
-		if (dict_get(&conf->sc_filters, arg) == f) {
-			yyerror("filter chain cannot contain itself");
-			return (0);
-		}
-		for (i = 0; i < f->argc; ++i)
-			if (strcasecmp(f->argv[i], arg) == 0) {
-				yyerror("filter chain cannot contain twice the same filter instance");
-				return (0);
-			}
-	}
-
-	f->argv[f->argc++] = arg;
-
-	return (1);
 }
 
 static int

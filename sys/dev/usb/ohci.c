@@ -1,4 +1,4 @@
-/*	$OpenBSD: ohci.c,v 1.147 2016/09/15 02:00:17 dlg Exp $ */
+/*	$OpenBSD: ohci.c,v 1.152 2017/06/01 09:47:55 mpi Exp $ */
 /*	$NetBSD: ohci.c,v 1.139 2003/02/22 05:24:16 tsutsui Exp $	*/
 /*	$FreeBSD: src/sys/dev/usb/ohci.c,v 1.22 1999/11/17 22:33:40 n_hibma Exp $	*/
 
@@ -90,7 +90,6 @@ usbd_status	ohci_open(struct usbd_pipe *);
 int		ohci_setaddr(struct usbd_device *, int);
 void		ohci_poll(struct usbd_bus *);
 void		ohci_softintr(void *);
-void		ohci_waitintr(struct ohci_softc *, struct usbd_xfer *);
 void		ohci_add_done(struct ohci_softc *, ohci_physaddr_t);
 void		ohci_rhsc(struct ohci_softc *, struct usbd_xfer *);
 
@@ -1506,42 +1505,6 @@ ohci_root_ctrl_done(struct usbd_xfer *xfer)
 {
 }
 
-/*
- * Wait here until controller claims to have an interrupt.
- * Then call ohci_intr and return.  Use timeout to avoid waiting
- * too long.
- */
-void
-ohci_waitintr(struct ohci_softc *sc, struct usbd_xfer *xfer)
-{
-	int timo;
-	u_int32_t intrs;
-
-	xfer->status = USBD_IN_PROGRESS;
-	for (timo = xfer->timeout; timo >= 0; timo--) {
-		usb_delay_ms(&sc->sc_bus, 1);
-		if (sc->sc_bus.dying)
-			break;
-		intrs = OREAD4(sc, OHCI_INTERRUPT_STATUS) & sc->sc_eintrs;
-		DPRINTFN(15,("ohci_waitintr: 0x%04x\n", intrs));
-#ifdef OHCI_DEBUG
-		if (ohcidebug > 15)
-			ohci_dumpregs(sc);
-#endif
-		if (intrs) {
-			ohci_intr1(sc);
-			if (xfer->status != USBD_IN_PROGRESS)
-				return;
-		}
-	}
-
-	/* Timeout */
-	DPRINTF(("ohci_waitintr: timeout\n"));
-	xfer->status = USBD_TIMEOUT;
-	usb_transfer_complete(xfer);
-	/* XXX should free TD */
-}
-
 void
 ohci_poll(struct usbd_bus *bus)
 {
@@ -1686,7 +1649,7 @@ ohci_add_ed(struct ohci_soft_ed *sed, struct ohci_soft_ed *head)
 {
 	DPRINTFN(8,("ohci_add_ed: sed=%p head=%p\n", sed, head));
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 	sed->next = head->next;
 	sed->ed.ed_nexted = head->ed.ed_nexted;
 	head->next = sed;
@@ -1701,7 +1664,7 @@ ohci_rem_ed(struct ohci_soft_ed *sed, struct ohci_soft_ed *head)
 {
 	struct ohci_soft_ed *p;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	/* XXX */
 	for (p = head; p != NULL && p->next != sed; p = p->next)
@@ -1729,7 +1692,7 @@ ohci_hash_add_td(struct ohci_softc *sc, struct ohci_soft_td *std)
 {
 	int h = HASH(std->physaddr);
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	LIST_INSERT_HEAD(&sc->sc_hash_tds[h], std, hnext);
 }
@@ -1754,7 +1717,7 @@ ohci_hash_add_itd(struct ohci_softc *sc, struct ohci_soft_itd *sitd)
 {
 	int h = HASH(sitd->physaddr);
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10,("ohci_hash_add_itd: sitd=%p physaddr=0x%08lx\n",
 		    sitd, (u_long)sitd->physaddr));
@@ -1766,7 +1729,7 @@ ohci_hash_add_itd(struct ohci_softc *sc, struct ohci_soft_itd *sitd)
 void
 ohci_hash_rem_itd(struct ohci_softc *sc, struct ohci_soft_itd *sitd)
 {
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10,("ohci_hash_rem_itd: sitd=%p physaddr=0x%08lx\n",
 		    sitd, (u_long)sitd->physaddr));
@@ -2587,7 +2550,7 @@ ohci_root_ctrl_start(struct usbd_xfer *xfer)
 	s = splusb();
 	usb_transfer_complete(xfer);
 	splx(s);
-	return (USBD_IN_PROGRESS);
+	return (err);
 }
 
 /* Abort a root control request. */
@@ -2685,9 +2648,6 @@ ohci_device_ctrl_start(struct usbd_xfer *xfer)
 	err = ohci_device_request(xfer);
 	if (err)
 		return (err);
-
-	if (sc->sc_bus.use_polling)
-		ohci_waitintr(sc, xfer);
 
 	return (USBD_IN_PROGRESS);
 }
@@ -2826,9 +2786,6 @@ ohci_device_bulk_start(struct usbd_xfer *xfer)
 
 	splx(s);
 
-	if (sc->sc_bus.use_polling)
-		ohci_waitintr(sc, xfer);
-
 	return (USBD_IN_PROGRESS);
 }
 
@@ -2943,9 +2900,6 @@ ohci_device_intr_start(struct usbd_xfer *xfer)
 	}
 #endif
 	splx(s);
-
-	if (sc->sc_bus.use_polling)
-		ohci_waitintr(sc, xfer);
 
 	return (USBD_IN_PROGRESS);
 }
@@ -3219,13 +3173,6 @@ ohci_device_isoc_start(struct usbd_xfer *xfer)
 	if (xfer->status != USBD_IN_PROGRESS)
 		printf("ohci_device_isoc_start: not in progress %p\n", xfer);
 #endif
-
-	/* XXX anything to do? */
-
-	if (sc->sc_bus.use_polling) {
-		DPRINTF(("Starting ohci isoc xfer with polling. Bad idea?\n"));
-		ohci_waitintr(sc, xfer);
-	}
 
 	return (USBD_IN_PROGRESS);
 }

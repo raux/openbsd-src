@@ -1,4 +1,4 @@
-/*	$OpenBSD: envy.c,v 1.68 2016/09/19 06:46:44 ratchov Exp $	*/
+/*	$OpenBSD: envy.c,v 1.70 2017/03/28 05:23:15 ratchov Exp $	*/
 /*
  * Copyright (c) 2007 Alexandre Ratchov <alex@caoua.org>
  *
@@ -1032,11 +1032,8 @@ envy_mt_write_4(struct envy_softc *sc, int reg, int val)
 int
 envy_cci_read(struct envy_softc *sc, int index)
 {
-	int val;
-
 	envy_ccs_write(sc, ENVY_CCI_INDEX, index);
-	val = envy_ccs_read(sc, ENVY_CCI_DATA);
-	return val;
+	return (envy_ccs_read(sc, ENVY_CCI_DATA));
 }
 
 void
@@ -1855,6 +1852,7 @@ envy_set_params(void *self, int setmode, int usemode,
 	reg |= envy_rates[i].reg;
 	envy_mt_write_1(sc, ENVY_MT_RATE, reg);
 	if (setmode & AUMODE_PLAY) {
+		p->sample_rate = envy_rates[i].rate;
 		p->encoding = AUDIO_ENCODING_SLINEAR_LE;
 		p->precision = 24;
 		p->bps = 4;
@@ -1862,6 +1860,7 @@ envy_set_params(void *self, int setmode, int usemode,
 		p->channels = sc->isht ? sc->card->noch : ENVY_PCHANS;
 	}
 	if (setmode & AUMODE_RECORD) {
+		r->sample_rate = envy_rates[i].rate;
 		r->encoding = AUDIO_ENCODING_SLINEAR_LE;
 		r->precision = 24;
 		r->bps = 4;

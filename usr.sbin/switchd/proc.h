@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.h,v 1.4 2016/10/05 16:58:19 reyk Exp $	*/
+/*	$OpenBSD: proc.h,v 1.6 2017/01/09 14:49:22 reyk Exp $	*/
 
 /*
  * Copyright (c) 2010-2015 Reyk Floeter <reyk@openbsd.org>
@@ -155,6 +155,7 @@ struct imsgev *
 	 proc_iev(struct privsep *, enum privsep_procid, int);
 enum privsep_procid
 	 proc_getid(struct privsep_proc *, unsigned int, const char *);
+int	 proc_flush_imsg(struct privsep *, enum privsep_procid, int);
 
 /* control.c */
 int	 control_init(struct privsep *, struct control_sock *);
@@ -167,7 +168,8 @@ void	 control(struct privsep *, struct privsep_proc *);
 /* log.c */
 void	log_init(int, int);
 void	log_procinit(const char *);
-void	log_verbose(int);
+void	log_setverbose(int);
+int	log_getverbose(void);
 void	log_warn(const char *, ...)
 	    __attribute__((__format__ (printf, 1, 2)));
 void	log_warnx(const char *, ...)

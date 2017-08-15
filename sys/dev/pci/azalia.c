@@ -1,4 +1,4 @@
-/*	$OpenBSD: azalia.c,v 1.229 2016/09/19 06:46:44 ratchov Exp $	*/
+/*	$OpenBSD: azalia.c,v 1.236 2017/08/10 15:25:52 tb Exp $	*/
 /*	$NetBSD: azalia.c,v 1.20 2006/05/07 08:31:44 kent Exp $	*/
 
 /*-
@@ -32,7 +32,8 @@
 
 /*
  * High Definition Audio Specification
- *	ftp://download.intel.com/standards/hdaudio/pdf/HDAudio_03.pdf
+ *
+ * http://www.intel.com/content/dam/www/public/us/en/documents/product-specifications/high-definition-audio-specification.pdf
  *
  *
  * TO DO:
@@ -41,6 +42,7 @@
  */
 
 #include <sys/param.h>
+#include <sys/fcntl.h>
 #include <sys/device.h>
 #include <sys/malloc.h>
 #include <sys/systm.h>
@@ -453,8 +455,10 @@ azalia_configure_pci(azalia_t *az)
 	case PCI_PRODUCT_INTEL_BAYTRAIL_HDA:
 	case PCI_PRODUCT_INTEL_100SERIES_HDA:
 	case PCI_PRODUCT_INTEL_100SERIES_LP_HDA:
+	case PCI_PRODUCT_INTEL_200SERIES_U_HDA:
 	case PCI_PRODUCT_INTEL_C600_HDA:
 	case PCI_PRODUCT_INTEL_C610_HDA:
+	case PCI_PRODUCT_INTEL_BSW_HDA:
 		reg = azalia_pci_read(az->pc, az->tag,
 		    INTEL_PCIE_NOSNOOP_REG);
 		reg &= INTEL_PCIE_NOSNOOP_MASK;
@@ -693,12 +697,23 @@ azalia_shutdown(void *v)
 {
 	azalia_t *az = (azalia_t *)v;
 	uint32_t gctl;
+	codec_t *codec;
+	int i;
 
 	/* disable unsolicited response */
 	gctl = AZ_READ_4(az, GCTL);
 	AZ_WRITE_4(az, GCTL, gctl & ~(HDA_GCTL_UNSOL));
 
 	timeout_del(&az->unsol_to);
+
+	/* power off all codecs */
+	for (i = 0; i < az->ncodecs; i++) {
+		codec = &az->codecs[i];
+		if (codec->audiofunc < 0)
+			continue;
+		azalia_comresp(codec, codec->audiofunc, CORB_SET_POWER_STATE,
+		    CORB_PS_D3, NULL);
+	}
 
 	/* halt CORB/RIRB */
 	azalia_halt_corb(az);
@@ -3842,6 +3857,10 @@ azalia_open(void *v, int flags)
 	DPRINTFN(1, ("%s: flags=0x%x\n", __func__, flags));
 	az = v;
 	codec = &az->codecs[az->codecno];
+	if ((flags & FWRITE) && codec->dacs.ngroups == 0)
+		return ENODEV;
+	if ((flags & FREAD) && codec->adcs.ngroups == 0)
+		return ENODEV;
 	codec->running++;
 	return 0;
 }

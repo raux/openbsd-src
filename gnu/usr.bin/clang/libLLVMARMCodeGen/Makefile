@@ -1,4 +1,4 @@
-# $OpenBSD: Makefile,v 1.1 2016/09/17 16:43:51 kettenis Exp $
+# $OpenBSD: Makefile,v 1.3 2017/07/09 15:28:34 espie Exp $
 
 LIB=	LLVMARMCodeGen
 NOPIC=
@@ -11,6 +11,7 @@ SRCS=	A15SDOptimizer.cpp \
 	ARMAsmPrinter.cpp \
 	ARMBaseInstrInfo.cpp \
 	ARMBaseRegisterInfo.cpp \
+	ARMComputeBlockSize.cpp \
 	ARMConstantIslandPass.cpp \
 	ARMConstantPoolValue.cpp \
 	ARMExpandPseudoInsts.cpp \
@@ -40,10 +41,7 @@ SRCS=	A15SDOptimizer.cpp \
 
 .PATH:	${.CURDIR}/../../../llvm/lib/Target/ARM
 
-depend:
-	# Nothing here so far ...
-
 install:
-	# Nothing here so far ...
+	@# Nothing here so far ...
 
 .include <bsd.lib.mk>

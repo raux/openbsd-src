@@ -6,14 +6,14 @@ CONFDIR != cd ${.CURDIR}/../../conf; pwd
 config:
 	@echo make obj required first >&2
 	@false
-.elif !exists(${OBJDIR}/Makefile)
+.else
 .PHONY: config clean
 config:
-	config -b ${.OBJDIR} -s ${SYSDIR} ${CONFDIR}/${.CURDIR:T}
-
-clean:
-
+	config ${.CURDIR:M*.PROF:C/.*/-p/} -b ${.OBJDIR} \
+		-s ${SYSDIR} ${CONFDIR}/${.CURDIR:T:S/.PROF$//}
 .endif
+
+cleandir clean:
 
 .include <bsd.obj.mk>
 

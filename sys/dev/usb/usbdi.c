@@ -1,4 +1,4 @@
-/*	$OpenBSD: usbdi.c,v 1.85 2016/10/04 14:12:05 mpi Exp $ */
+/*	$OpenBSD: usbdi.c,v 1.95 2017/05/15 10:52:08 mpi Exp $ */
 /*	$NetBSD: usbdi.c,v 1.103 2002/09/27 15:37:38 provos Exp $	*/
 /*	$FreeBSD: src/sys/dev/usb/usbdi.c,v 1.28 1999/11/17 22:33:49 n_hibma Exp $	*/
 
@@ -271,7 +271,7 @@ usbd_close_pipe(struct usbd_pipe *pipe)
 	pipe->methods->close(pipe);
 	if (pipe->intrxfer != NULL)
 		usbd_free_xfer(pipe->intrxfer);
-	free(pipe, M_USB, 0);
+	free(pipe, M_USB, pipe->pipe_size);
 	return (USBD_NORMAL_COMPLETION);
 }
 
@@ -279,6 +279,8 @@ usbd_status
 usbd_transfer(struct usbd_xfer *xfer)
 {
 	struct usbd_pipe *pipe = xfer->pipe;
+	struct usbd_bus *bus = pipe->device->bus;
+	int polling = bus->use_polling;
 	usbd_status err;
 	int flags, s;
 
@@ -298,8 +300,6 @@ usbd_transfer(struct usbd_xfer *xfer)
 
 	/* If there is no buffer, allocate one. */
 	if ((xfer->rqflags & URQ_DEV_DMABUF) == 0) {
-		struct usbd_bus *bus = pipe->device->bus;
-
 #ifdef DIAGNOSTIC
 		if (xfer->rqflags & URQ_AUTO_DMABUF)
 			printf("usbd_transfer: has old buffer!\n");
@@ -322,11 +322,9 @@ usbd_transfer(struct usbd_xfer *xfer)
 
 	err = pipe->methods->transfer(xfer);
 
-	if (err != USBD_IN_PROGRESS && err) {
+	if (err != USBD_IN_PROGRESS && err != USBD_NORMAL_COMPLETION) {
 		/* The transfer has not been queued, so free buffer. */
 		if (xfer->rqflags & URQ_AUTO_DMABUF) {
-			struct usbd_bus *bus = pipe->device->bus;
-
 			usb_freemem(bus, &xfer->dmabuf);
 			xfer->rqflags &= ~URQ_AUTO_DMABUF;
 		}
@@ -338,19 +336,40 @@ usbd_transfer(struct usbd_xfer *xfer)
 	/* Sync transfer, wait for completion. */
 	if (err != USBD_IN_PROGRESS)
 		return (err);
-	s = splusb();
-	while (!xfer->done) {
-		if (pipe->device->bus->use_polling)
-			panic("usbd_transfer: not done");
-		flags = PRIBIO | (xfer->flags & USBD_CATCH ? PCATCH : 0);
 
-		err = tsleep(xfer, flags, "usbsyn", 0);
-		if (err && !xfer->done) {
-			usbd_abort_pipe(pipe);
-			if (err == EINTR)
-				xfer->status = USBD_INTERRUPTED;
-			else
-				xfer->status = USBD_TIMEOUT;
+	s = splusb();
+	if (polling) {
+		int timo;
+
+		for (timo = xfer->timeout; timo >= 0; timo--) {
+			usb_delay_ms(bus, 1);
+			if (bus->dying) {
+				xfer->status = USBD_IOERROR;
+				usb_transfer_complete(xfer);
+				break;
+			}
+
+			usbd_dopoll(pipe->device);
+			if (xfer->done)
+				break;
+		}
+
+		if (timo < 0) {
+			xfer->status = USBD_TIMEOUT;
+			usb_transfer_complete(xfer);
+		}
+	} else {
+		while (!xfer->done) {
+			flags = PRIBIO|(xfer->flags & USBD_CATCH ? PCATCH : 0);
+
+			err = tsleep(xfer, flags, "usbsyn", 0);
+			if (err && !xfer->done) {
+				usbd_abort_pipe(pipe);
+				if (err == EINTR)
+					xfer->status = USBD_INTERRUPTED;
+				else
+					xfer->status = USBD_TIMEOUT;
+			}
 		}
 	}
 	splx(s);
@@ -696,9 +715,10 @@ void
 usb_transfer_complete(struct usbd_xfer *xfer)
 {
 	struct usbd_pipe *pipe = xfer->pipe;
-	int polling;
+	int polling = pipe->device->bus->use_polling;
+	int status, flags;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(5, ("usb_transfer_complete: pipe=%p xfer=%p status=%d "
 		     "actlen=%d\n", pipe, xfer, xfer->status, xfer->actlen));
@@ -709,13 +729,6 @@ usb_transfer_complete(struct usbd_xfer *xfer)
 	}
 #endif
 
-#ifdef DIAGNOSTIC
-	if (pipe == NULL) {
-		printf("usb_transfer_complete: pipe==0, xfer=%p\n", xfer);
-		return;
-	}
-#endif
-	polling = pipe->device->bus->use_polling;
 	/* XXXX */
 	if (polling)
 		pipe->running = 0;
@@ -773,6 +786,13 @@ usb_transfer_complete(struct usbd_xfer *xfer)
 		xfer->status = USBD_SHORT_XFER;
 	}
 
+	/*
+	 * We cannot dereference ``xfer'' after calling the callback as
+	 * it might free it.
+	 */
+	status = xfer->status;
+	flags = xfer->flags;
+
 	if (pipe->repeat) {
 		if (xfer->callback)
 			xfer->callback(xfer, xfer->priv, xfer->status);
@@ -783,23 +803,13 @@ usb_transfer_complete(struct usbd_xfer *xfer)
 			xfer->callback(xfer, xfer->priv, xfer->status);
 	}
 
-	/*
-	 * If we already got an I/O error that generally means the
-	 * device is gone or not responding, so don't try to enqueue
-	 * a new transfer as it will more likely results in the same
-	 * error.
-	 */
-	if (xfer->status == USBD_IOERROR)
-		pipe->repeat = 0;
-
-	if ((xfer->flags & USBD_SYNCHRONOUS) && !polling)
+	if ((flags & USBD_SYNCHRONOUS) && !polling)
 		wakeup(xfer);
 
 	if (!pipe->repeat) {
 		/* XXX should we stop the queue on all errors? */
-		if ((xfer->status == USBD_CANCELLED ||
-		     xfer->status == USBD_IOERROR ||
-		     xfer->status == USBD_TIMEOUT) &&
+		if ((status == USBD_CANCELLED || status == USBD_IOERROR ||
+		     status == USBD_TIMEOUT) &&
 		    pipe->iface != NULL)		/* not control pipe */
 			pipe->running = 0;
 		else
@@ -842,7 +852,7 @@ usbd_start_next(struct usbd_pipe *pipe)
 	struct usbd_xfer *xfer;
 	usbd_status err;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 #ifdef DIAGNOSTIC
 	if (pipe == NULL) {
@@ -1104,4 +1114,3 @@ usbd_str(usb_string_descriptor_t *p, int l, const char *s)
 		USETW2(p->bString[i], 0, s[i]);
 	return (2 * i + 2);
 }
-

@@ -1,4 +1,4 @@
-/*	$OpenBSD: audio.c,v 1.156 2016/10/09 11:37:23 kettenis Exp $	*/
+/*	$OpenBSD: audio.c,v 1.165 2017/06/26 07:02:16 ratchov Exp $	*/
 /*
  * Copyright (c) 2015 Alexandre Ratchov <alex@caoua.org>
  *
@@ -50,9 +50,8 @@
 #define DEVNAME(sc)		((sc)->dev.dv_xname)
 #define AUDIO_UNIT(n)		(minor(n) & 0x0f)
 #define AUDIO_DEV(n)		(minor(n) & 0xf0)
-#define AUDIO_DEV_SOUND		0	/* minor of /dev/sound0 */
+#define AUDIO_DEV_AUDIO		0	/* minor of /dev/audio0 */
 #define AUDIO_DEV_MIXER		0x10	/* minor of /dev/mixer0 */
-#define AUDIO_DEV_AUDIO		0x80	/* minor of /dev/audio0 */
 #define AUDIO_DEV_AUDIOCTL	0xc0	/* minor of /dev/audioctl */
 #define AUDIO_BUFSZ		65536	/* buffer size in bytes */
 
@@ -219,7 +218,7 @@ audio_buf_rgetblk(struct audio_buf *buf, size_t *rsize)
 }
 
 /*
- * discard "count" bytes at the start postion.
+ * discard "count" bytes at the start position.
  */
 void
 audio_buf_rdiscard(struct audio_buf *buf, size_t count)
@@ -362,7 +361,7 @@ audio_pintr(void *addr)
 		return;
 	}
 	if (sc->quiesce) {
-		DPRINTF("%s: quesced, skipping play intr\n", DEVNAME(sc));
+		DPRINTF("%s: quiesced, skipping play intr\n", DEVNAME(sc));
 		return;
 	}
 
@@ -433,7 +432,7 @@ audio_rintr(void *addr)
 		return;
 	}
 	if (sc->quiesce) {
-		DPRINTF("%s: quesced, skipping rec intr\n", DEVNAME(sc));
+		DPRINTF("%s: quiesced, skipping rec intr\n", DEVNAME(sc));
 		return;
 	}
 
@@ -499,16 +498,7 @@ audio_start_do(struct audio_softc *sc)
 	unsigned char *ptr;
 	size_t count;
 
-	DPRINTFN(1, "%s: start play: "
-	    "start = %zu, used = %zu, "
-	    "len = %zu, blksz = %zu\n",
-	    DEVNAME(sc), sc->play.start, sc->play.used,
-	    sc->play.len, sc->play.blksz);
-	DPRINTFN(1, "%s: start rec: "
-	    "start = %zu, used = %zu, "
-	    "len = %zu, blksz = %zu\n",
-	    DEVNAME(sc), sc->rec.start, sc->rec.used,
-	    sc->rec.len, sc->rec.blksz);
+	DPRINTF("%s: starting\n", DEVNAME(sc));
 
 	error = 0;
 	sc->offs = 0;
@@ -568,6 +558,7 @@ audio_stop_do(struct audio_softc *sc)
 		sc->ops->halt_output(sc->arg);
 	if (sc->mode & AUMODE_RECORD)
 		sc->ops->halt_input(sc->arg);
+	DPRINTF("%s: stopped\n", DEVNAME(sc));
 	return 0;
 }
 
@@ -618,37 +609,18 @@ audio_setpar(struct audio_softc *sc)
 	    sc->rate, sc->pchan, sc->rchan, sc->round, sc->nblks);
 
 	/*
-	 * AUDIO_ENCODING_SLINEAR and AUDIO_ENCODING_ULINEAR are not
-	 * used anymore, promote them to the _LE and _BE equivalents
-	 */
-	if (sc->sw_enc == AUDIO_ENCODING_SLINEAR) {
-#if BYTE_ORDER == LITTLE_ENDIAN
-		sc->sw_enc = AUDIO_ENCODING_SLINEAR_LE;
-#else
-		sc->sw_enc = AUDIO_ENCODING_SLINEAR_BE;
-#endif
-	}
-	if (sc->sw_enc == AUDIO_ENCODING_ULINEAR) {
-#if BYTE_ORDER == LITTLE_ENDIAN
-		sc->sw_enc = AUDIO_ENCODING_ULINEAR_LE;
-#else
-		sc->sw_enc = AUDIO_ENCODING_ULINEAR_BE;
-#endif
-	}
-
-	/*
 	 * check if requested parameters are in the allowed ranges
 	 */
 	if (sc->mode & AUMODE_PLAY) {
 		if (sc->pchan < 1)
 			sc->pchan = 1;
-		if (sc->pchan > 64)
+		else if (sc->pchan > 64)
 			sc->pchan = 64;
 	}
 	if (sc->mode & AUMODE_RECORD) {
 		if (sc->rchan < 1)
 			sc->rchan = 1;
-		if (sc->rchan > 64)
+		else if (sc->rchan > 64)
 			sc->rchan = 64;
 	}
 	switch (sc->sw_enc) {
@@ -664,15 +636,15 @@ audio_setpar(struct audio_softc *sc)
 	}
 	if (sc->bits < 8)
 		sc->bits = 8;
-	if (sc->bits > 32)
+	else if (sc->bits > 32)
 		sc->bits = 32;
 	if (sc->bps < 1)
 		sc->bps = 1;
-	if (sc->bps > 4)
+	else if (sc->bps > 4)
 		sc->bps = 4;
 	if (sc->rate < 4000)
 		sc->rate = 4000;
-	if (sc->rate > 192000)
+	else if (sc->rate > 192000)
 		sc->rate = 192000;
 
 	/*
@@ -751,14 +723,13 @@ audio_setpar(struct audio_softc *sc)
 		if (sc->bits == 8) {
 			sc->conv_enc = slinear8_to_mulaw;
 			sc->conv_dec = mulaw_to_slinear8;
-			break;
 		} else if (sc->bits == 24) {
 			sc->conv_enc = slinear24_to_mulaw24;
 			sc->conv_dec = mulaw24_to_slinear24;
-			break;
+		} else {
+			sc->sw_enc = sc->hw_enc;
+			sc->conv_dec = sc->conv_enc = NULL;
 		}
-		sc->sw_enc = sc->hw_enc;
-		sc->conv_dec = sc->conv_enc = NULL;
 		break;
 	default:
 		printf("%s: setpar: enc = %d, bits = %d: emulation skipped\n",
@@ -800,7 +771,7 @@ audio_setpar(struct audio_softc *sc)
 	    DEVNAME(sc), mult);
 
 	/*
-	 * get minumum and maximum frames per block
+	 * get minimum and maximum frames per block
 	 */
 	if (sc->ops->round_blocksize)
 		blk_max = sc->ops->round_blocksize(sc->arg, AUDIO_BUFSZ);
@@ -837,7 +808,7 @@ audio_setpar(struct audio_softc *sc)
 	sc->round -= sc->round % mult;
 	if (sc->round > max)
 		sc->round = max;
-	if (sc->round < min)
+	else if (sc->round < min)
 		sc->round = min;
 	sc->round = sc->round;
 
@@ -849,7 +820,7 @@ audio_setpar(struct audio_softc *sc)
 		max = sc->play.datalen / sc->play.blksz;
 		if (sc->nblks > max)
 			sc->nblks = max;
-		if (sc->nblks < 2)
+		else if (sc->nblks < 2)
 			sc->nblks = 2;
 		sc->play.len = sc->nblks * sc->play.blksz;
 		sc->nblks = sc->nblks;
@@ -1111,7 +1082,7 @@ audio_activate(struct device *self, int act)
 		 */
 		if (sc->mode != 0 && sc->active)
 			audio_stop_do(sc);
-		DPRINTF("%s: quesce: active = %d\n", DEVNAME(sc), sc->active);
+		DPRINTF("%s: quiesce: active = %d\n", DEVNAME(sc), sc->active);
 		break;
 	case DVACT_WAKEUP:
 		DPRINTF("%s: wakeup: active = %d\n", DEVNAME(sc), sc->active);
@@ -1126,7 +1097,7 @@ audio_activate(struct device *self, int act)
 		sc->quiesce = 0;
 		wakeup(&sc->quiesce);
 
-		if(sc->mode != 0) {
+		if (sc->mode != 0) {
 			if (audio_setpar(sc) != 0)
 				break;
 			if (sc->mode & AUMODE_PLAY) {
@@ -1164,7 +1135,6 @@ audio_detach(struct device *self, int flags)
 	 * close uses device_lookup, it returns EXIO and does nothing
 	 */
 	mn = self->dv_unit;
-	vdevgone(maj, mn | AUDIO_DEV_SOUND, mn | AUDIO_DEV_SOUND, VCHR);
 	vdevgone(maj, mn | AUDIO_DEV_AUDIO, mn | AUDIO_DEV_AUDIO, VCHR);
 	vdevgone(maj, mn | AUDIO_DEV_AUDIOCTL, mn | AUDIO_DEV_AUDIOCTL, VCHR);
 	vdevgone(maj, mn | AUDIO_DEV_MIXER, mn | AUDIO_DEV_MIXER, VCHR);
@@ -1409,13 +1379,9 @@ audio_read(struct audio_softc *sc, struct uio *uio, int ioflag)
 		    &audio_lock, PWAIT | PCATCH, "au_rd", 0);
 		if (!(sc->dev.dv_flags & DVF_ACTIVE))
 			error = EIO;
-#ifdef AUDIO_DEBUG
 		if (error) {
 			DPRINTF("%s: read woke up error = %d\n",
 			    DEVNAME(sc), error);
-		}
-#endif
-		if (error) {
 			mtx_leave(&audio_lock);
 			return error;
 		}
@@ -1426,6 +1392,7 @@ audio_read(struct audio_softc *sc, struct uio *uio, int ioflag)
 		ptr = audio_buf_rgetblk(&sc->rec, &count);
 		if (count > uio->uio_resid)
 			count = uio->uio_resid;
+		audio_buf_rdiscard(&sc->rec, count);
 		mtx_leave(&audio_lock);
 		DPRINTFN(1, "%s: read: start = %zu, count = %zu\n",
 		    DEVNAME(sc), ptr - sc->rec.data, count);
@@ -1435,7 +1402,6 @@ audio_read(struct audio_softc *sc, struct uio *uio, int ioflag)
 		if (error)
 			return error;
 		mtx_enter(&audio_lock);
-		audio_buf_rdiscard(&sc->rec, count);
 	}
 	mtx_leave(&audio_lock);
 	return 0;
@@ -1456,7 +1422,7 @@ audio_write(struct audio_softc *sc, struct uio *uio, int ioflag)
 
 	/*
 	 * if IO_NDELAY flag is set then check if there is enough room
-	 * in the buffer to store at least one byte. If not then dont
+	 * in the buffer to store at least one byte. If not then don't
 	 * start the write process.
 	 */
 	mtx_enter(&audio_lock);
@@ -1486,19 +1452,16 @@ audio_write(struct audio_softc *sc, struct uio *uio, int ioflag)
 			    &audio_lock, PWAIT | PCATCH, "au_wr", 0);
 			if (!(sc->dev.dv_flags & DVF_ACTIVE))
 				error = EIO;
-#ifdef AUDIO_DEBUG
 			if (error) {
 				DPRINTF("%s: write woke up error = %d\n",
 				    DEVNAME(sc), error);
-			}
-#endif
-			if (error) {
 				mtx_leave(&audio_lock);
 				return error;
 			}
 		}
 		if (count > uio->uio_resid)
 			count = uio->uio_resid;
+		audio_buf_wcommit(&sc->play, count);
 		mtx_leave(&audio_lock);
 		error = uiomove(ptr, count, uio);
 		if (error)
@@ -1508,17 +1471,14 @@ audio_write(struct audio_softc *sc, struct uio *uio, int ioflag)
 			DPRINTFN(1, "audio_write: converted count = %zu\n",
 			    count);
 		}
-		mtx_enter(&audio_lock);
-		audio_buf_wcommit(&sc->play, count);
 
 		/* start automatically if audio_ioc_start() was never called */
 		if (audio_canstart(sc)) {
-			mtx_leave(&audio_lock);
 			error = audio_start(sc);
 			if (error)
 				return error;
-			mtx_enter(&audio_lock);
 		}
+		mtx_enter(&audio_lock);
 	}
 	mtx_leave(&audio_lock);
 	return 0;
@@ -1645,7 +1605,6 @@ audioopen(dev_t dev, int flags, int mode, struct proc *p)
 		error = ENXIO;
 	else {
 		switch (AUDIO_DEV(dev)) {
-		case AUDIO_DEV_SOUND:
 		case AUDIO_DEV_AUDIO:
 			error = audio_open(sc, flags);
 			break;
@@ -1671,7 +1630,6 @@ audioclose(dev_t dev, int flags, int ifmt, struct proc *p)
 	if (sc == NULL)
 		return ENXIO;
 	switch (AUDIO_DEV(dev)) {
-	case AUDIO_DEV_SOUND:
 	case AUDIO_DEV_AUDIO:
 		error = audio_close(sc);
 		break;
@@ -1696,7 +1654,6 @@ audioread(dev_t dev, struct uio *uio, int ioflag)
 	if (sc == NULL)
 		return ENXIO;
 	switch (AUDIO_DEV(dev)) {
-	case AUDIO_DEV_SOUND:
 	case AUDIO_DEV_AUDIO:
 		error = audio_read(sc, uio, ioflag);
 		break;
@@ -1721,7 +1678,6 @@ audiowrite(dev_t dev, struct uio *uio, int ioflag)
 	if (sc == NULL)
 		return ENXIO;
 	switch (AUDIO_DEV(dev)) {
-	case AUDIO_DEV_SOUND:
 	case AUDIO_DEV_AUDIO:
 		error = audio_write(sc, uio, ioflag);
 		break;
@@ -1746,7 +1702,6 @@ audioioctl(dev_t dev, u_long cmd, caddr_t addr, int flag, struct proc *p)
 	if (sc == NULL)
 		return ENXIO;
 	switch (AUDIO_DEV(dev)) {
-	case AUDIO_DEV_SOUND:
 	case AUDIO_DEV_AUDIO:
 		error = audio_ioctl(sc, cmd, addr);
 		break;
@@ -1781,16 +1736,14 @@ audiopoll(dev_t dev, int events, struct proc *p)
 	if (sc == NULL)
 		return POLLERR;
 	switch (AUDIO_DEV(dev)) {
-	case AUDIO_DEV_SOUND:
 	case AUDIO_DEV_AUDIO:
 		revents = audio_poll(sc, events, p);
 		break;
 	case AUDIO_DEV_AUDIOCTL:
 	case AUDIO_DEV_MIXER:
-		revents = 0;
-		break;
 	default:
 		revents = 0;
+		break;
 	}
 	device_unref(&sc->dev);
 	return revents;
@@ -1943,7 +1896,7 @@ wskbd_mixer_update(struct audio_softc *sc, struct wskbd_vol *vol)
 			gain = ctrl.un.value.level[i] + vol->step * val_pending;
 			if (gain > AUDIO_MAX_GAIN)
 				gain = AUDIO_MAX_GAIN;
-			if (gain < AUDIO_MIN_GAIN)
+			else if (gain < AUDIO_MIN_GAIN)
 				gain = AUDIO_MIN_GAIN;
 			ctrl.un.value.level[i] = gain;
 			DPRINTFN(1, "%s: wskbd level %d set to %d\n",

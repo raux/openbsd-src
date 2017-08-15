@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofp.c,v 1.13 2016/10/05 16:40:55 reyk Exp $	*/
+/*	$OpenBSD: ofp.c,v 1.18 2016/12/22 15:31:43 rzalamena Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -93,8 +93,7 @@ ofp_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	struct privsep			*ps = p->p_ps;
 	struct switchd			*sc = ps->ps_env;
-	struct sockaddr_un		 un;
-	struct switch_device		*sdv;
+	struct switch_client		 swc;
 	struct switch_connection	*con;
 
 	switch (imsg->hdr.type) {
@@ -103,24 +102,16 @@ ofp_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 			close(sc->sc_tap);
 		sc->sc_tap = imsg->fd;
 		return (0);
-	case IMSG_CTL_DEVICE_CONNECT:
-	case IMSG_CTL_DEVICE_DISCONNECT:
-		IMSG_SIZE_CHECK(imsg, sdv);
-		sdv = imsg->data;
+	case IMSG_CTL_CONNECT:
+	case IMSG_CTL_DISCONNECT:
+		IMSG_SIZE_CHECK(imsg, &swc);
+		memcpy(&swc, imsg->data, sizeof(swc));
 
-		if (strlcpy(un.sun_path, sdv->sdv_device,
-		    sizeof(un.sun_path)) >= sizeof(un.sun_path)) {
-			log_warnx("invalid device: %s", sdv->sdv_device);
-			return (0);
-		}
-		un.sun_family = AF_UNIX;
-		un.sun_len = sizeof(un);
-
-		if (imsg->hdr.type == IMSG_CTL_DEVICE_CONNECT)
-			ofrelay_attach(&sc->sc_server,
-			    imsg->fd, (struct sockaddr *)&un);
-		else if ((con =
-		    switchd_connbyaddr(sc, (struct sockaddr *)&un)) != NULL)
+		if (imsg->hdr.type == IMSG_CTL_CONNECT)
+			ofrelay_attach(&sc->sc_server, imsg->fd,
+			    (struct sockaddr *)&swc.swc_addr.swa_addr);
+		else if ((con = switchd_connbyaddr(sc,
+		    (struct sockaddr *)&swc.swc_addr.swa_addr)) != NULL)
 			ofp_close(con);
 		return (0);
 	default:
@@ -138,6 +129,24 @@ ofp_input(struct switch_connection *con, struct ibuf *ibuf)
 
 	if ((oh = ibuf_seek(ibuf, 0, sizeof(*oh))) == NULL) {
 		log_debug("short header");
+		return (-1);
+	}
+
+	/* Check for message version match. */
+	if (con->con_state > OFP_STATE_HELLO_WAIT &&
+	    con->con_version != OFP_V_0 &&
+	    oh->oh_version != con->con_version) {
+		log_debug("wrong version %s, expected %s",
+		    print_map(oh->oh_version, ofp_v_map),
+		    print_map(con->con_version, ofp_v_map));
+		return (-1);
+	}
+
+	/* Check the state machine to decide whether or not to allow. */
+	if (con->con_state <= OFP_STATE_HELLO_WAIT &&
+	    oh->oh_type > OFP_T_ERROR) {
+		log_debug("expected hello, got %s",
+		    print_map(oh->oh_type, ofp_t_map));
 		return (-1);
 	}
 
@@ -164,30 +173,6 @@ ofp_input(struct switch_connection *con, struct ibuf *ibuf)
 }
 
 int
-ofp_output(struct switch_connection *con, struct ofp_header *oh,
-    struct ibuf *obuf)
-{
-	struct ibuf	*buf;
-
-	if ((buf = ibuf_static()) == NULL)
-		return (-1);
-	if ((oh != NULL) &&
-	    (ibuf_add(buf, oh, sizeof(*oh)) == -1)) {
-		ibuf_release(buf);
-		return (-1);
-	}
-	if ((obuf != NULL) &&
-	    (ibuf_cat(buf, obuf) == -1)) {
-		ibuf_release(buf);
-		return (-1);
-	}
-
-	ofrelay_write(con, buf);
-
-	return (0);
-}
-
-int
 ofp_open(struct privsep *ps, struct switch_connection *con)
 {
 	struct switch_control	*sw;
@@ -199,6 +184,13 @@ ofp_open(struct privsep *ps, struct switch_connection *con)
 	    __func__, con->con_id, con->con_instance,
 	    sw == NULL ? 0 : sw->sw_id);
 
+	/* Send the hello with the latest version we support. */
+	if (ofp_send_hello(ps->ps_env, con, OFP_V_1_3) == -1)
+		return (-1);
+
+	if (ofp_nextstate(ps->ps_env, con, OFP_STATE_HELLO_WAIT) == -1)
+		return (-1);
+
 	return (0);
 }
 
@@ -206,4 +198,59 @@ void
 ofp_close(struct switch_connection *con)
 {
 	ofrelay_close(con);
+}
+
+int
+ofp_nextstate(struct switchd *sc, struct switch_connection *con,
+    enum ofp_state state)
+{
+	int		rv = 0;
+
+	switch (con->con_state) {
+	case OFP_STATE_CLOSED:
+		if (state != OFP_STATE_HELLO_WAIT)
+			return (-1);
+
+		break;
+
+	case OFP_STATE_HELLO_WAIT:
+		if (state != OFP_STATE_FEATURE_WAIT)
+			return (-1);
+
+		rv = ofp_send_featuresrequest(sc, con);
+		break;
+
+	case OFP_STATE_FEATURE_WAIT:
+		if (state != OFP_STATE_ESTABLISHED)
+			return (-1);
+
+		if (con->con_version != OFP_V_1_3)
+			break;
+
+#if 0
+		/* Let's not ask this while we don't use it. */
+		ofp13_flow_stats(sc, con, OFP_PORT_ANY, OFP_GROUP_ID_ANY,
+		    OFP_TABLE_ID_ALL);
+		ofp13_desc(sc, con);
+#endif
+		rv |= ofp13_table_features(sc, con, 0);
+		rv |= ofp13_setconfig(sc, con, OFP_CONFIG_FRAG_NORMAL,
+		    OFP_CONTROLLER_MAXLEN_NO_BUFFER);
+		break;
+
+
+	case OFP_STATE_ESTABLISHED:
+		if (state != OFP_STATE_CLOSED)
+			return (-1);
+
+		break;
+
+	default:
+		return (-1);
+	}
+
+	/* Set the next state. */
+	con->con_state = state;
+
+	return (rv);
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: printconf.c,v 1.99 2016/10/14 16:05:36 phessler Exp $	*/
+/*	$OpenBSD: printconf.c,v 1.106 2017/08/12 16:47:50 phessler Exp $	*/
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -27,6 +27,7 @@
 #include "mrt.h"
 #include "session.h"
 #include "rde.h"
+#include "log.h"
 
 void		 print_op(enum comp_ops);
 void		 print_community(int, int);
@@ -93,6 +94,8 @@ print_community(int as, int type)
 		printf("*:");
 	else if (as == COMMUNITY_NEIGHBOR_AS)
 		printf("neighbor-as:");
+	else if (as == COMMUNITY_LOCAL_AS)
+		printf("local-as:");
 	else
 		printf("%u:", (unsigned int)as);
 
@@ -100,6 +103,8 @@ print_community(int as, int type)
 		printf("* ");
 	else if (type == COMMUNITY_NEIGHBOR_AS)
 		printf("neighbor-as ");
+	else if (type == COMMUNITY_LOCAL_AS)
+		printf("local-as");
 	else
 		printf("%d ", type);
 }
@@ -111,6 +116,8 @@ print_largecommunity(int64_t as, int64_t ld1, int64_t ld2)
 		printf("*:");
 	else if (as == COMMUNITY_NEIGHBOR_AS)
 		printf("neighbor-as:");
+	else if (as == COMMUNITY_LOCAL_AS)
+		printf("local-as:");
 	else
 		printf("%lld:", as);
 
@@ -118,6 +125,8 @@ print_largecommunity(int64_t as, int64_t ld1, int64_t ld2)
 		printf("*:");
 	else if (ld1 == COMMUNITY_NEIGHBOR_AS)
 		printf("neighbor-as:");
+	else if (ld1 == COMMUNITY_LOCAL_AS)
+		printf("local-as:");
 	else
 		printf("%lld:", ld1);
 
@@ -125,6 +134,8 @@ print_largecommunity(int64_t as, int64_t ld1, int64_t ld2)
 		printf("* ");
 	else if (ld2 == COMMUNITY_NEIGHBOR_AS)
 		printf("neighbor-as ");
+	else if (ld2 == COMMUNITY_LOCAL_AS)
+		printf("local-as ");
 	else
 		printf("%lld ", ld2);
 
@@ -134,25 +145,39 @@ print_largecommunity(int64_t as, int64_t ld1, int64_t ld2)
 void
 print_extcommunity(struct filter_extcommunity *c)
 {
-	switch (c->type & EXT_COMMUNITY_VALUE) {
-	case EXT_COMMUNITY_TWO_AS:
-		printf("%s %hu:%u ", log_ext_subtype(c->subtype),
-		    c->data.ext_as.as, c->data.ext_as.val);
+	printf("%s ", log_ext_subtype(c->type, c->subtype));
+
+	switch (c->type) {
+	case EXT_COMMUNITY_TRANS_TWO_AS:
+		printf("%hu:%u ", c->data.ext_as.as, c->data.ext_as.val);
 		break;
-	case EXT_COMMUNITY_IPV4:
-		printf("%s %s:%u ", log_ext_subtype(c->subtype),
-		    inet_ntoa(c->data.ext_ip.addr), c->data.ext_ip.val);
+	case EXT_COMMUNITY_TRANS_IPV4:
+		printf("%s:%u ", inet_ntoa(c->data.ext_ip.addr),
+		    c->data.ext_ip.val);
 		break;
-	case EXT_COMMUNITY_FOUR_AS:
-		printf("%s %s:%u ", log_ext_subtype(c->subtype),
-		    log_as(c->data.ext_as4.as4), c->data.ext_as.val);
+	case EXT_COMMUNITY_TRANS_FOUR_AS:
+		printf("%s:%u ", log_as(c->data.ext_as4.as4),
+		    c->data.ext_as.val);
 		break;
-	case EXT_COMMUNITY_OPAQUE:
-		printf("%s 0x%llx ", log_ext_subtype(c->subtype),
-		    c->data.ext_opaq);
+	case EXT_COMMUNITY_TRANS_OPAQUE:
+	case EXT_COMMUNITY_TRANS_EVPN:
+		printf("0x%llx ", c->data.ext_opaq);
+		break;
+	case EXT_COMMUNITY_NON_TRANS_OPAQUE:
+		switch (c->data.ext_opaq) {
+		case EXT_COMMUNITY_OVS_VALID:
+			printf("valid ");
+			break;
+		case EXT_COMMUNITY_OVS_NOTFOUND:
+			printf("not-found ");
+			break;
+		case EXT_COMMUNITY_OVS_INVALID:
+			printf("invalid ");
+			break;
+		}
 		break;
 	default:
-		printf("0x%x 0x%llx ", c->type, c->data.ext_opaq);
+		printf("0x%llx ", c->data.ext_opaq);
 		break;
 	}
 }
@@ -413,6 +438,12 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\trib \"%s\"\n", c, p->rib);
 	if (p->remote_as)
 		printf("%s\tremote-as %s\n", c, log_as(p->remote_as));
+	if (p->local_as != conf->as) {
+		printf("%s\tlocal-as %s", c, log_as(p->local_as));
+		if (p->local_as > USHRT_MAX && p->local_short_as != AS_TRANS)
+			printf(" %u", p->local_short_as);
+		printf("\n");
+	}
 	if (p->down)
 		printf("%s\tdown\n", c);
 	if (p->distance > 1)
@@ -453,6 +484,10 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\tenforce neighbor-as yes\n", c);
 	else
 		printf("%s\tenforce neighbor-as no\n", c);
+	if (p->enforce_local_as == ENFORCE_AS_ON)
+		printf("%s\tenforce local-as yes\n", c);
+	else
+		printf("%s\tenforce local-as no\n", c);
 	if (p->reflector_client) {
 		if (conf->clusterid == 0)
 			printf("%s\troute-reflector\n", c);
@@ -502,17 +537,6 @@ print_peer(struct peer_config *p, struct bgpd_config *conf, const char *c)
 		printf("%s\tttl-security yes\n", c);
 
 	print_announce(p, c);
-
-	if (p->softreconfig_in == 1)
-		printf("%s\tsoftreconfig in yes\n", c);
-	else
-		printf("%s\tsoftreconfig in no\n", c);
-
-	if (p->softreconfig_out == 1)
-		printf("%s\tsoftreconfig out yes\n", c);
-	else
-		printf("%s\tsoftreconfig out no\n", c);
-
 
 	print_mrt(conf, p->id, p->groupid, c, "\t");
 
@@ -617,6 +641,10 @@ print_rule(struct peer *peer_l, struct filter_rule *r)
 			printf("group \"%s\" ", p->conf.group);
 	} else if (r->peer.remote_as) {
 		printf("AS %s ", log_as(r->peer.remote_as));
+	} else if (r->peer.ebgp) {
+		printf("ebgp ");
+	} else if (r->peer.ibgp) {
+		printf("ibgp ");
 	} else
 		printf("any ");
 

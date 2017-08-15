@@ -1,5 +1,5 @@
 #! /usr/bin/perl
-# $OpenBSD: flow.pl,v 1.3 2016/10/26 14:06:33 bluhm Exp $
+# $OpenBSD: flow.pl,v 1.6 2017/03/03 21:34:14 bluhm Exp $
 
 # Copyright (c) 2013 Florian Obser <florian@openbsd.org>
 #
@@ -20,8 +20,6 @@ use strict;
 use warnings;
 use 5.010;
 use Config;
-
-use lib '.';
 
 use Data::Dumper;
 use IO::Socket::INET;
@@ -151,12 +149,6 @@ open($prog, '|pfctl -f -') or die $!;
 print $prog gen_pf_conf(get_ifs());
 close($prog) or die $!;
 
-open($prog, 'pfctl -si|') or die $!;
-$line = <$prog>;
-close($prog);
-
-system('pfctl', '-q', '-e') if ($line!~/^Status: Enabled/);
-
 if (`ifconfig pflow0 2>&1` ne "pflow0: no such interface\n") {
 	system('ifconfig', 'pflow0', 'destroy');
 }
@@ -220,9 +212,7 @@ while ($sock->recv($packet,1548)) {
 					    $flow_ref->{name2id($name)});
 				}
 			}
-			my $duration = ($end-$start);
-			say 'duration >= 9 && duration <= 12: '.
-			    ($duration >= 9 && $duration <= 12 );
+
 			say 'ingressInterface == egressInterface && '.
 			    'egressInterface > 0: ', ($iif == $eif && $eif > 0);
 		}

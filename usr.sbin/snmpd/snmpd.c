@@ -1,4 +1,4 @@
-/*	$OpenBSD: snmpd.c,v 1.34 2016/10/28 09:07:08 rzalamena Exp $	*/
+/*	$OpenBSD: snmpd.c,v 1.37 2017/08/12 04:29:57 rob Exp $	*/
 
 /*
  * Copyright (c) 2007, 2008, 2012 Reyk Floeter <reyk@openbsd.org>
@@ -158,6 +158,7 @@ main(int argc, char *argv[])
 		switch (c) {
 		case 'd':
 			debug++;
+			flags |= SNMPD_F_DEBUG;
 			break;
 		case 'D':
 			if (cmdline_symset(optarg) < 0)
@@ -221,7 +222,7 @@ main(int argc, char *argv[])
 		errx(1, "unknown user %s", SNMPD_USER);
 
 	log_init(debug, LOG_DAEMON);
-	log_verbose(verbose);
+	log_setverbose(verbose);
 
 	gettimeofday(&env->sc_starttime, NULL);
 	env->sc_engine_boots = 0;
@@ -253,6 +254,9 @@ main(int argc, char *argv[])
 	signal_add(&ps->ps_evsigusr1, NULL);
 
 	proc_connect(ps);
+
+	if (pledge("stdio rpath cpath dns id proc sendfd exec", NULL) == -1)
+		fatal("pledge");
 
 	event_dispatch();
 
@@ -374,16 +378,19 @@ snmpd_engine_time(void)
 }
 
 char *
-tohexstr(u_int8_t *str, int len)
+tohexstr(u_int8_t *bstr, int len)
 {
 #define MAXHEXSTRLEN		256
 	static char hstr[2 * MAXHEXSTRLEN + 1];
-	char *r = hstr;
+	static const char hex[] = "0123456789abcdef";
+	int i;
 
 	if (len > MAXHEXSTRLEN)
 		len = MAXHEXSTRLEN;	/* truncate */
-	while (len-- > 0)
-		r += snprintf(r, len * 2, "%0*x", 2, *str++);
-	*r = '\0';
+	for (i = 0; i < len; i++) {
+		hstr[i + i] = hex[bstr[i] >> 4];
+		hstr[i + i + 1] = hex[bstr[i] & 0x0f];
+	}
+	hstr[i + i] = '\0';
 	return hstr;
 }

@@ -1,4 +1,4 @@
-/*	$OpenBSD: uvm_map.c,v 1.225 2016/09/16 02:35:42 dlg Exp $	*/
+/*	$OpenBSD: uvm_map.c,v 1.232 2017/08/12 16:30:10 guenther Exp $	*/
 /*	$NetBSD: uvm_map.c,v 1.86 2000/11/27 08:40:03 chs Exp $	*/
 
 /*
@@ -2407,7 +2407,7 @@ uvm_map_setup(struct vm_map *map, vaddr_t min, vaddr_t max, int flags)
 	map->s_start = map->s_end = 0; /* Empty stack area by default. */
 	map->flags = flags;
 	map->timestamp = 0;
-	rw_init(&map->lock, "vmmaplk");
+	rw_init_flags(&map->lock, "vmmaplk", RWL_DUPOK);
 	mtx_init(&map->mtx, IPL_VM);
 	mtx_init(&map->flags_lock, IPL_VM);
 
@@ -2480,7 +2480,7 @@ uvm_map_teardown(struct vm_map *map)
 	if ((entry = RBT_ROOT(uvm_map_addr, &map->addr)) != NULL)
 		DEAD_ENTRY_PUSH(&dead_entries, entry);
 	while (entry != NULL) {
-		sched_pause();
+		sched_pause(yield);
 		uvm_unmap_kill_entry(map, entry);
 		if ((tmp = RBT_LEFT(uvm_map_addr, entry)) != NULL)
 			DEAD_ENTRY_PUSH(&dead_entries, tmp);
@@ -2798,7 +2798,7 @@ uvm_map_init(void)
 	pool_init(&uvm_map_entry_pool, sizeof(struct vm_map_entry), 0,
 	    IPL_VM, PR_WAITOK, "vmmpepl", NULL);
 	pool_init(&uvm_map_entry_kmem_pool, sizeof(struct vm_map_entry), 0,
-	    IPL_NONE, 0, "vmmpekpl", NULL);
+	    IPL_VM, 0, "vmmpekpl", NULL);
 	pool_sethiwat(&uvm_map_entry_pool, 8192);
 
 	uvm_addr_init();
@@ -2951,7 +2951,7 @@ uvm_page_printit(pg, full, pr)
 	    pg->uobject, pg->uanon, (long long)pg->offset);
 #if defined(UVM_PAGE_TRKOWN)
 	if (pg->pg_flags & PG_BUSY)
-		(*pr)("  owning process = %d, tag=%s",
+		(*pr)("  owning thread = %d, tag=%s",
 		    pg->owner, pg->owner_tag);
 	else
 		(*pr)("  page not busy, no owner");
@@ -4163,10 +4163,6 @@ uvm_map_extract(struct vm_map *srcmap, vaddr_t start, vsize_t len,
 
 	/*
 	 * Handle need-copy flag.
-	 * This may invalidate last, hence the re-initialization during the
-	 * loop.
-	 *
-	 * Also, perform clipping of last if not UVM_EXTRACT_QREF.
 	 */
 	for (entry = first; entry != NULL && entry->start < end;
 	    entry = RBT_NEXT(uvm_map_addr, entry)) {
@@ -5063,7 +5059,7 @@ vm_map_lock_try_ln(struct vm_map *map, char *file, int line)
 	boolean_t rv;
 
 	if (map->flags & VM_MAP_INTRSAFE) {
-		rv = mtx_enter_try(&map->mtx);
+		rv = _mtx_enter_try(&map->mtx LOCK_FL_ARGS);
 	} else {
 		mtx_enter(&map->flags_lock);
 		if (map->flags & VM_MAP_BUSY) {
@@ -5071,12 +5067,13 @@ vm_map_lock_try_ln(struct vm_map *map, char *file, int line)
 			return (FALSE);
 		}
 		mtx_leave(&map->flags_lock);
-		rv = (rw_enter(&map->lock, RW_WRITE|RW_NOSLEEP) == 0);
+		rv = (_rw_enter(&map->lock, RW_WRITE|RW_NOSLEEP LOCK_FL_ARGS)
+		    == 0);
 		/* check if the lock is busy and back out if we won the race */
 		if (rv) {
 			mtx_enter(&map->flags_lock);
 			if (map->flags & VM_MAP_BUSY) {
-				rw_exit(&map->lock);
+				_rw_exit(&map->lock LOCK_FL_ARGS);
 				rv = FALSE;
 			}
 			mtx_leave(&map->flags_lock);
@@ -5106,16 +5103,17 @@ tryagain:
 				    PVM, vmmapbsy, 0);
 			}
 			mtx_leave(&map->flags_lock);
-		} while (rw_enter(&map->lock, RW_WRITE|RW_SLEEPFAIL) != 0);
+		} while (_rw_enter(&map->lock, RW_WRITE|RW_SLEEPFAIL
+		    LOCK_FL_ARGS) != 0);
 		/* check if the lock is busy and back out if we won the race */
 		mtx_enter(&map->flags_lock);
 		if (map->flags & VM_MAP_BUSY) {
-			rw_exit(&map->lock);
+			_rw_exit(&map->lock LOCK_FL_ARGS);
 			goto tryagain;
 		}
 		mtx_leave(&map->flags_lock);
 	} else {
-		mtx_enter(&map->mtx);
+		_mtx_enter(&map->mtx LOCK_FL_ARGS);
 	}
 
 	map->timestamp++;
@@ -5128,9 +5126,9 @@ void
 vm_map_lock_read_ln(struct vm_map *map, char *file, int line)
 {
 	if ((map->flags & VM_MAP_INTRSAFE) == 0)
-		rw_enter_read(&map->lock);
+		_rw_enter_read(&map->lock LOCK_FL_ARGS);
 	else
-		mtx_enter(&map->mtx);
+		_mtx_enter(&map->mtx LOCK_FL_ARGS);
 	LPRINTF(("map   lock: %p (at %s %d)\n", map, file, line));
 	uvm_tree_sanity(map, file, line);
 	uvm_tree_size_chk(map, file, line);
@@ -5143,9 +5141,9 @@ vm_map_unlock_ln(struct vm_map *map, char *file, int line)
 	uvm_tree_size_chk(map, file, line);
 	LPRINTF(("map unlock: %p (at %s %d)\n", map, file, line));
 	if ((map->flags & VM_MAP_INTRSAFE) == 0)
-		rw_exit(&map->lock);
+		_rw_exit(&map->lock LOCK_FL_ARGS);
 	else
-		mtx_leave(&map->mtx);
+		_mtx_leave(&map->mtx LOCK_FL_ARGS);
 }
 
 void
@@ -5155,9 +5153,9 @@ vm_map_unlock_read_ln(struct vm_map *map, char *file, int line)
 	/* XXX: RO */ uvm_tree_size_chk(map, file, line);
 	LPRINTF(("map unlock: %p (at %s %d)\n", map, file, line));
 	if ((map->flags & VM_MAP_INTRSAFE) == 0)
-		rw_exit_read(&map->lock);
+		_rw_exit_read(&map->lock LOCK_FL_ARGS);
 	else
-		mtx_leave(&map->mtx);
+		_mtx_leave(&map->mtx LOCK_FL_ARGS);
 }
 
 void
@@ -5169,7 +5167,7 @@ vm_map_downgrade_ln(struct vm_map *map, char *file, int line)
 	LPRINTF(("map   lock: %p (at %s %d)\n", map, file, line));
 	KASSERT((map->flags & VM_MAP_INTRSAFE) == 0);
 	if ((map->flags & VM_MAP_INTRSAFE) == 0)
-		rw_enter(&map->lock, RW_DOWNGRADE);
+		_rw_enter(&map->lock, RW_DOWNGRADE LOCK_FL_ARGS);
 }
 
 void
@@ -5180,8 +5178,8 @@ vm_map_upgrade_ln(struct vm_map *map, char *file, int line)
 	LPRINTF(("map unlock: %p (at %s %d)\n", map, file, line));
 	KASSERT((map->flags & VM_MAP_INTRSAFE) == 0);
 	if ((map->flags & VM_MAP_INTRSAFE) == 0) {
-		rw_exit_read(&map->lock);
-		rw_enter_write(&map->lock);
+		_rw_exit_read(&map->lock LOCK_FL_ARGS);
+		_rw_enter_write(&map->lock LOCK_FL_ARGS);
 	}
 	LPRINTF(("map   lock: %p (at %s %d)\n", map, file, line));
 	uvm_tree_sanity(map, file, line);
@@ -5291,9 +5289,6 @@ uvm_map_setup_md(struct vm_map *map)
 		min = VMMAP_MIN_ADDR;
 
 #if 0	/* Cool stuff, not yet */
-	/* Hinted allocations. */
-	map->uaddr_any[1] = uaddr_hint_create(min, max, 1024 * 1024 * 1024);
-
 	/* Executable code is special. */
 	map->uaddr_exe = uaddr_rnd_create(min, I386_MAX_EXE_ADDR);
 	/* Place normal allocations beyond executable mappings. */
@@ -5323,13 +5318,6 @@ uvm_map_setup_md(struct vm_map *map)
 		min = VMMAP_MIN_ADDR;
 
 #if 0	/* Cool stuff, not yet */
-	/* Hinted allocations above 4GB */
-	map->uaddr_any[0] =
-	    uaddr_hint_create(0x100000000ULL, max, 1024 * 1024 * 1024);
-	/* Hinted allocations below 4GB */
-	map->uaddr_any[1] = uaddr_hint_create(min, 0x100000000ULL,
-	    1024 * 1024 * 1024);
-	/* Normal allocations, always above 4GB */
 	map->uaddr_any[3] = uaddr_pivot_create(MAX(min, 0x100000000ULL), max);
 #else	/* Crappy stuff, for now */
 	map->uaddr_any[0] = uaddr_rnd_create(min, max);
@@ -5356,9 +5344,6 @@ uvm_map_setup_md(struct vm_map *map)
 		min = VMMAP_MIN_ADDR;
 
 #if 0	/* Cool stuff, not yet */
-	/* Hinted allocations. */
-	map->uaddr_any[1] = uaddr_hint_create(min, max, 1024 * 1024 * 1024);
-	/* Normal allocations. */
 	map->uaddr_any[3] = uaddr_pivot_create(min, max);
 #else	/* Crappy stuff, for now */
 	map->uaddr_any[0] = uaddr_rnd_create(min, max);

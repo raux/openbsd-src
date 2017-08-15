@@ -1,4 +1,4 @@
-/*	$OpenBSD: parse.y,v 1.9 2016/10/05 17:31:22 reyk Exp $	*/
+/*	$OpenBSD: parse.y,v 1.29 2017/05/04 08:26:06 reyk Exp $	*/
 
 /*
  * Copyright (c) 2007-2016 Reyk Floeter <reyk@openbsd.org>
@@ -44,6 +44,8 @@
 #include <util.h>
 #include <errno.h>
 #include <err.h>
+#include <pwd.h>
+#include <grp.h>
 
 #include "proc.h"
 #include "vmd.h"
@@ -87,6 +89,7 @@ static struct vmop_create_params vmc;
 static struct vm_create_params	*vcp;
 static struct vmd_switch	*vsw;
 static struct vmd_if		*vif;
+static struct vmd_vm		*vm;
 static unsigned int		 vsw_unit;
 static char			 vsw_type[IF_NAMESIZE];
 static int			 vcp_disable;
@@ -100,6 +103,10 @@ typedef struct {
 		uint8_t		 lladdr[ETHER_ADDR_LEN];
 		int64_t		 number;
 		char		*string;
+		struct {
+			uid_t	 uid;
+			int64_t	 gid;
+		}		 owner;
 	} v;
 	int lineno;
 } YYSTYPE;
@@ -108,15 +115,18 @@ typedef struct {
 
 
 %token	INCLUDE ERROR
-%token	ADD DISK DOWN INTERFACE NIFS PATH SIZE SWITCH UP VMID
-%token	ENABLE DISABLE VM KERNEL LLADDR MEMORY
+%token	ADD BOOT DISABLE DISK DOWN ENABLE GROUP INTERFACE LLADDR LOCAL LOCKED
+%token	MEMORY NIFS OWNER PATH PREFIX RDOMAIN SIZE SWITCH UP VM VMID
+%token	<v.number>	NUMBER
 %token	<v.string>	STRING
-%token  <v.number>	NUMBER
-%type	<v.number>	disable
-%type	<v.number>	updown
 %type	<v.lladdr>	lladdr
-%type	<v.string>	string
+%type	<v.number>	disable
+%type	<v.number>	local
+%type	<v.number>	locked
+%type	<v.number>	updown
+%type	<v.owner>	owner_id
 %type	<v.string>	optstring
+%type	<v.string>	string
 
 %%
 
@@ -124,6 +134,7 @@ grammar		: /* empty */
 		| grammar include '\n'
 		| grammar '\n'
 		| grammar varset '\n'
+		| grammar main '\n'
 		| grammar switch '\n'
 		| grammar vm '\n'
 		| grammar error '\n'		{ file->errors++; }
@@ -160,43 +171,44 @@ varset		: STRING '=' STRING		{
 		}
 		;
 
+main		: LOCAL PREFIX STRING {
+			struct address	 h;
+
+			/* The local prefix is IPv4-only */
+			if (host($3, &h) == -1 ||
+			    h.ss.ss_family != AF_INET ||
+			    h.prefixlen > 32 || h.prefixlen < 0) {
+				yyerror("invalid local prefix: %s", $3);
+				free($3);
+				YYERROR;
+			}
+
+			memcpy(&env->vmd_cfg.cfg_localprefix, &h, sizeof(h));
+		}
+		;
+
 switch		: SWITCH string			{
 			if ((vsw = calloc(1, sizeof(*vsw))) == NULL)
 				fatal("could not allocate switch");
 
 			vsw->sw_id = env->vmd_nswitches + 1;
 			vsw->sw_name = $2;
-			vsw->sw_flags = IFF_UP;
+			vsw->sw_flags = VMIFF_UP;
 			snprintf(vsw->sw_ifname, sizeof(vsw->sw_ifname),
 			    "%s%u", vsw_type, vsw_unit++);
 			TAILQ_INIT(&vsw->sw_ifs);
 
 			vcp_disable = 0;
 		} '{' optnl switch_opts_l '}'	{
-			TAILQ_INSERT_TAIL(env->vmd_switches, vsw, sw_entry);
-			env->vmd_nswitches++;
-
 			if (vcp_disable) {
 				log_debug("%s:%d: switch \"%s\""
 				    " skipped (disabled)",
 				    file->name, yylval.lineno, vsw->sw_name);
 			} else if (!env->vmd_noaction) {
-				/*
-				 * XXX Configure the switch right away -
-				 * XXX this should be done after parsing
-				 * XXX the configuration.
-				 */
-				if (vm_priv_brconfig(&env->vmd_ps, vsw) == -1) {
-					log_warn("%s:%d: switch \"%s\" failed",
-					    file->name, yylval.lineno,
-					    vsw->sw_name);
-					YYERROR;
-				} else {
-					log_debug("%s:%d: switch \"%s\""
-					    " configured",
-					    file->name, yylval.lineno,
-					    vsw->sw_name);
-				}
+				TAILQ_INSERT_TAIL(env->vmd_switches, vsw, sw_entry);
+				env->vmd_nswitches++;
+				log_debug("%s:%d: switch \"%s\" registered",
+				    file->name, yylval.lineno, vsw->sw_name);
 			}
 		}
 		;
@@ -223,6 +235,14 @@ switch_opts	: disable			{
 
 			TAILQ_INSERT_TAIL(&vsw->sw_ifs, vif, vif_entry);
 		}
+		| GROUP string			{
+			if (priv_validgroup($2) == -1) {
+				yyerror("invalid group name: %s", $2);
+				free($2);
+				YYERROR;
+			}
+			vsw->sw_group = $2;
+		}
 		| INTERFACE string		{
 			if (priv_getiftype($2, vsw_type, &vsw_unit) == -1 ||
 			    priv_findname(vsw_type, vmd_descsw) == -1) {
@@ -240,11 +260,22 @@ switch_opts	: disable			{
 			}
 			free($2);
 		}
+		| LOCKED LLADDR			{
+			vsw->sw_flags |= VMIFF_LOCKED;
+		}
+		| RDOMAIN NUMBER		{
+			if ($2 < 0 || $2 > RT_TABLEID_MAX) {
+				yyerror("invalid rdomain: %lld", $2);
+				YYERROR;
+			}
+			vsw->sw_flags |= VMIFF_RDOMAIN;
+			vsw->sw_rdomain = $2;
+		}
 		| updown			{
 			if ($1)
-				vsw->sw_flags |= IFF_UP;
+				vsw->sw_flags |= VMIFF_UP;
 			else
-				vsw->sw_flags &= ~IFF_UP;
+				vsw->sw_flags &= ~VMIFF_UP;
 		}
 		;
 
@@ -266,6 +297,10 @@ vm		: VM string			{
 				yyerror("vm name too long");
 				YYERROR;
 			}
+
+			/* set default user/group permissions */
+			vmc.vmc_uid = 0;
+			vmc.vmc_gid = -1;
 		} '{' optnl vm_opts_l '}'	{
 			int ret;
 
@@ -273,31 +308,29 @@ vm		: VM string			{
 			if (vcp_nnics > vcp->vcp_nnics)
 				vcp->vcp_nnics = vcp_nnics;
 
-			if (vcp_disable) {
-				log_debug("%s:%d: vm \"%s\" skipped (disabled)",
-				    file->name, yylval.lineno, vcp->vcp_name);
-			} else if (!env->vmd_noaction) {
-				/*
-				 * XXX Start the vm right away -
-				 * XXX this should be done after parsing
-				 * XXX the configuration.
-				 */
-				ret = config_getvm(&env->vmd_ps, &vmc, -1, -1);
+			if (!env->vmd_noaction) {
+				ret = vm_register(&env->vmd_ps, &vmc,
+				    &vm, 0, 0);
 				if (ret == -1 && errno == EALREADY) {
 					log_debug("%s:%d: vm \"%s\""
-					    " skipped (running)",
+					    " skipped (%s)",
 					    file->name, yylval.lineno,
-					    vcp->vcp_name);
+					    vcp->vcp_name, vm->vm_running ?
+					    "running" : "already exists");
 				} else if (ret == -1) {
 					log_warn("%s:%d: vm \"%s\" failed",
 					    file->name, yylval.lineno,
 					    vcp->vcp_name);
 					YYERROR;
 				} else {
-					log_debug("%s:%d: vm \"%s\" enabled",
+					if (vcp_disable)
+						vm->vm_disabled = 1;
+					log_debug("%s:%d: vm \"%s\" registered (%s)",
 					    file->name, yylval.lineno,
-					    vcp->vcp_name);
+					    vcp->vcp_name,
+					    vcp_disable ? "disabled" : "enabled");
 				}
+				vm->vm_from_config = 1;
 			}
 		}
 		;
@@ -316,39 +349,43 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			free($2);
+			vmc.vmc_flags |= VMOP_CREATE_DISK;
 		}
-		| INTERFACE optstring iface_opts_o {
+		| local INTERFACE optstring iface_opts_o {
 			unsigned int	i;
 			char		type[IF_NAMESIZE];
 
 			i = vcp_nnics;
 			if (++vcp_nnics > VMM_MAX_NICS_PER_VM) {
 				yyerror("too many interfaces: %zu", vcp_nnics);
-				free($2);
+				free($3);
 				YYERROR;
 			}
 
-			if ($2 != NULL) {
-				if (strcmp($2, "tap") != 0 &&
-				    (priv_getiftype($2, type, NULL) == -1 ||
+			if ($1)
+				vmc.vmc_ifflags[i] |= VMIFF_LOCAL;
+			if ($3 != NULL) {
+				if (strcmp($3, "tap") != 0 &&
+				    (priv_getiftype($3, type, NULL) == -1 ||
 				    strcmp(type, "tap") != 0)) {
-					yyerror("invalid interface: %s", $2);
-					free($2);
+					yyerror("invalid interface: %s", $3);
+					free($3);
 					YYERROR;
 				}
 
-				if (strlcpy(vmc.vmc_ifnames[i], $2,
+				if (strlcpy(vmc.vmc_ifnames[i], $3,
 				    sizeof(vmc.vmc_ifnames[i])) >=
 				    sizeof(vmc.vmc_ifnames[i])) {
 					yyerror("interface name too long: %s",
-					    $2);
-					free($2);
+					    $3);
+					free($3);
 					YYERROR;
 				}
 			}
-			free($2);
+			free($3);
+			vmc.vmc_flags |= VMOP_CREATE_NETWORK;
 		}
-		| KERNEL string			{
+		| BOOT string			{
 			if (vcp->vcp_kernel[0] != '\0') {
 				yyerror("kernel specified more than once");
 				free($2);
@@ -363,6 +400,7 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			free($2);
+			vmc.vmc_flags |= VMOP_CREATE_KERNEL;
 		}
 		| NIFS NUMBER			{
 			if (vcp->vcp_nnics != 0) {
@@ -374,6 +412,7 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			vcp->vcp_nnics = (size_t)$2;
+			vmc.vmc_flags |= VMOP_CREATE_NETWORK;
 		}
 		| MEMORY NUMBER			{
 			ssize_t	 res;
@@ -386,6 +425,7 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			vcp->vcp_memranges[0].vmr_size = (size_t)res;
+			vmc.vmc_flags |= VMOP_CREATE_MEMORY;
 		}
 		| MEMORY STRING			{
 			ssize_t	 res;
@@ -400,15 +440,72 @@ vm_opts		: disable			{
 				YYERROR;
 			}
 			vcp->vcp_memranges[0].vmr_size = (size_t)res;
+			vmc.vmc_flags |= VMOP_CREATE_MEMORY;
+		}
+		| OWNER owner_id		{
+			vmc.vmc_uid = $2.uid;
+			vmc.vmc_gid = $2.gid;
+		}
+		;
+
+owner_id	: /* none */		{
+			$$.uid = 0;
+			$$.gid = -1;
+		}
+		| NUMBER		{
+			$$.uid = $1;
+			$$.gid = -1;
+		}
+		| STRING		{
+			char		*user, *group;
+			struct passwd	*pw;
+			struct group	*gr;
+
+			$$.uid = 0;
+			$$.gid = -1;
+
+			user = $1;
+			if ((group = strchr(user, ':')) != NULL) {
+				if (group == user)
+					user = NULL;
+				*group++ = '\0';
+			}
+
+			if (user != NULL && *user) {
+				if ((pw = getpwnam(user)) == NULL) {
+					yyerror("failed to get user: %s",
+					    user);
+					free($1);
+					YYERROR;
+				}
+				$$.uid = pw->pw_uid;
+			}
+
+			if (group != NULL && *group) {
+				if ((gr = getgrnam(group)) == NULL) {
+					yyerror("failed to get group: %s",
+					    group);
+					free($1);
+					YYERROR;
+				}
+				$$.gid = gr->gr_gid;
+			}
+
+			free($1);
 		}
 		;
 
 iface_opts_o	: '{' optnl iface_opts_l '}'
+		| iface_opts_c
 		| /* empty */
 		;
 
 iface_opts_l	: iface_opts_l iface_opts optnl
 		| iface_opts optnl
+		;
+
+iface_opts_c	: iface_opts_c iface_opts optcomma
+		| iface_opts
 		;
 
 iface_opts	: SWITCH string			{
@@ -424,14 +521,38 @@ iface_opts	: SWITCH string			{
 			}
 			free($2);
 		}
-		| LLADDR lladdr			{
-			memcpy(vcp->vcp_macs[vcp_nnics], $2, ETHER_ADDR_LEN);
+		| GROUP string			{
+			unsigned int	i = vcp_nnics;
+
+			if (priv_validgroup($2) == -1) {
+				yyerror("invalid group name: %s", $2);
+				free($2);
+				YYERROR;
+			}
+
+			/* No need to check if the group exists */
+			(void)strlcpy(vmc.vmc_ifgroup[i], $2,
+			    sizeof(vmc.vmc_ifgroup[i]));
+			free($2);
+		}
+		| locked LLADDR lladdr		{
+			if ($1)
+				vmc.vmc_ifflags[vcp_nnics] |= VMIFF_LOCKED;
+			memcpy(vcp->vcp_macs[vcp_nnics], $3, ETHER_ADDR_LEN);
+		}
+		| RDOMAIN NUMBER		{
+			if ($2 < 0 || $2 > RT_TABLEID_MAX) {
+				yyerror("invalid rdomain: %lld", $2);
+				YYERROR;
+			}
+			vmc.vmc_ifflags[vcp_nnics] |= VMIFF_RDOMAIN;
+			vmc.vmc_ifrdomain[vcp_nnics] = $2;
 		}
 		| updown			{
 			if ($1)
-				vmc.vmc_ifflags[vcp_nnics] |= IFF_UP;
+				vmc.vmc_ifflags[vcp_nnics] |= VMIFF_UP;
 			else
-				vmc.vmc_ifflags[vcp_nnics] &= ~IFF_UP;
+				vmc.vmc_ifflags[vcp_nnics] &= ~VMIFF_UP;
 		}
 		;
 
@@ -462,12 +583,24 @@ lladdr		: STRING			{
 		}
 		;
 
+local		: /* empty */			{ $$ = 0; }
+		| LOCAL				{ $$ = 1; }
+		;
+
+locked		: /* empty */			{ $$ = 0; }
+		| LOCKED			{ $$ = 1; }
+		;
+
 updown		: UP				{ $$ = 1; }
 		| DOWN				{ $$ = 0; }
 		;
 
 disable		: ENABLE			{ $$ = 0; }
 		| DISABLE			{ $$ = 1; }
+		;
+
+optcomma	: ','
+		|
 		;
 
 optnl		: '\n' optnl
@@ -512,17 +645,23 @@ lookup(char *s)
 	/* this has to be sorted always */
 	static const struct keywords keywords[] = {
 		{ "add",		ADD },
+		{ "boot",		BOOT },
 		{ "disable",		DISABLE },
 		{ "disk",		DISK },
 		{ "down",		DOWN },
 		{ "enable",		ENABLE },
+		{ "group",		GROUP },
 		{ "id",			VMID },
 		{ "include",		INCLUDE },
 		{ "interface",		INTERFACE },
 		{ "interfaces",		NIFS },
-		{ "kernel",		KERNEL },
 		{ "lladdr",		LLADDR },
+		{ "local",		LOCAL },
+		{ "locked",		LOCKED },
 		{ "memory",		MEMORY },
+		{ "owner",		OWNER },
+		{ "prefix",		PREFIX },
+		{ "rdomain",		RDOMAIN },
 		{ "size",		SIZE },
 		{ "switch",		SWITCH },
 		{ "up",			UP },
@@ -837,7 +976,9 @@ parse_config(const char *filename)
 
 	if ((file = pushfile(filename, 0)) == NULL) {
 		log_warn("failed to open %s", filename);
-		return (0);
+		if (errno == ENOENT)
+			return (0);
+		return (-1);
 	}
 	topfile = file;
 	setservent(1);
@@ -852,8 +993,7 @@ parse_config(const char *filename)
 	endservent();
 
 	/* Free macros and check which have not been used. */
-	for (sym = TAILQ_FIRST(&symhead); sym != NULL; sym = next) {
-		next = TAILQ_NEXT(sym, entry);
+	TAILQ_FOREACH_SAFE(sym, &symhead, entry, next) {
 		if (!sym->used)
 			fprintf(stderr, "warning: macro '%s' not "
 			    "used\n", sym->nam);
@@ -876,9 +1016,10 @@ symset(const char *nam, const char *val, int persist)
 {
 	struct sym	*sym;
 
-	for (sym = TAILQ_FIRST(&symhead); sym && strcmp(nam, sym->nam);
-	    sym = TAILQ_NEXT(sym, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(sym, &symhead, entry) {
+		if (strcmp(nam, sym->nam) == 0)
+			break;
+	}
 
 	if (sym != NULL) {
 		if (sym->persist == 1)
@@ -937,11 +1078,12 @@ symget(const char *nam)
 {
 	struct sym	*sym;
 
-	TAILQ_FOREACH(sym, &symhead, entry)
+	TAILQ_FOREACH(sym, &symhead, entry) {
 		if (strcmp(nam, sym->nam) == 0) {
 			sym->used = 1;
 			return (sym->val);
 		}
+	}
 	return (NULL);
 }
 
@@ -988,4 +1130,44 @@ parse_disk(char *word)
 	vcp->vcp_ndisks++;
 
 	return (0);
+}
+
+int
+host(const char *str, struct address *h)
+{
+	struct addrinfo		 hints, *res;
+	int			 prefixlen;
+	char			*s, *p;
+	const char		*errstr;
+
+	if ((s = strdup(str)) == NULL) {
+		log_warn("strdup");
+		goto fail;
+	}
+
+	if ((p = strrchr(s, '/')) != NULL) {
+		*p++ = '\0';
+		prefixlen = strtonum(p, 0, 128, &errstr);
+		if (errstr) {
+			log_warnx("prefixlen is %s: %s", errstr, p);
+			goto fail;
+		}
+	} else
+		prefixlen = 128;
+
+	memset(&hints, 0, sizeof(hints));
+	hints.ai_family = AF_UNSPEC;
+	hints.ai_flags = AI_NUMERICHOST;
+	if (getaddrinfo(s, NULL, &hints, &res) == 0) {
+		memset(h, 0, sizeof(*h));
+		memcpy(&h->ss, res->ai_addr, res->ai_addrlen);
+		h->prefixlen = prefixlen;
+		freeaddrinfo(res);
+		free(s);
+		return (0);
+	}
+
+ fail:
+	free(s);
+	return (-1);
 }

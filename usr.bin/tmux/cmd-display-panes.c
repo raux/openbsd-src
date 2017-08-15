@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-display-panes.c,v 1.16 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-display-panes.c,v 1.19 2017/04/22 10:22:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -40,8 +40,6 @@ const struct cmd_entry cmd_display_panes_entry = {
 	.args = { "t:", 0, 1 },
 	.usage = CMD_TARGET_CLIENT_USAGE,
 
-	.tflag = CMD_CLIENT,
-
 	.flags = CMD_AFTERHOOK,
 	.exec = cmd_display_panes_exec
 };
@@ -50,7 +48,10 @@ static enum cmd_retval
 cmd_display_panes_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args	*args = self->args;
-	struct client	*c = item->state.c;
+	struct client	*c;
+
+	if ((c = cmd_find_client(item, args_get(args, 't'), 0)) == NULL)
+		return (CMD_RETURN_ERROR);
 
 	if (c->identify_callback != NULL)
 		return (CMD_RETURN_NORMAL);
@@ -61,7 +62,7 @@ cmd_display_panes_exec(struct cmd *self, struct cmdq_item *item)
 	else
 		c->identify_callback_data = xstrdup("select-pane -t '%%'");
 
-	server_set_identify(c);
+	server_client_set_identify(c);
 
 	return (CMD_RETURN_NORMAL);
 }
@@ -90,7 +91,8 @@ cmd_display_panes_callback(struct client *c, struct window_pane *wp)
 	xasprintf(&expanded, "%%%u", wp->id);
 	cmd = cmd_template_replace(template, expanded, 1);
 
-	if (cmd_string_parse(cmd, &cmdlist, NULL, 0, &cause) != 0) {
+	cmdlist = cmd_string_parse(cmd, NULL, 0, &cause);
+	if (cmdlist == NULL) {
 		if (cause != NULL) {
 			new_item = cmdq_get_callback(cmd_display_panes_error,
 			    cause);

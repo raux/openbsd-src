@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-new-window.c,v 1.65 2016/10/16 22:06:40 nicm Exp $ */
+/* $OpenBSD: cmd-new-window.c,v 1.71 2017/07/21 09:17:19 nicm Exp $ */
 
 /*
  * Copyright (c) 2007 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -42,7 +42,7 @@ const struct cmd_entry cmd_new_window_entry = {
 	.usage = "[-adkP] [-c start-directory] [-F format] [-n window-name] "
 		 CMD_TARGET_WINDOW_USAGE " [command]",
 
-	.tflag = CMD_WINDOW_INDEX,
+	.target = { 't', CMD_FIND_WINDOW, CMD_FIND_WINDOW_INDEX },
 
 	.flags = 0,
 	.exec = cmd_new_window_exec
@@ -52,14 +52,14 @@ static enum cmd_retval
 cmd_new_window_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = self->args;
-	struct session		*s = item->state.tflag.s;
-	struct winlink		*wl = item->state.tflag.wl;
-	struct client		*c = item->state.c;
-	int			 idx = item->state.tflag.idx;
-	const char		*cmd, *path, *template, *cwd, *to_free;
-	char		       **argv, *cause, *cp;
+	struct cmd_find_state	*current = &item->shared->current;
+	struct session		*s = item->target.s;
+	struct winlink		*wl = item->target.wl;
+	struct client		*c = cmd_find_client(item, NULL, 1);
+	int			 idx = item->target.idx;
+	const char		*cmd, *path, *template, *cwd;
+	char		       **argv, *cause, *cp, *to_free = NULL;
 	int			 argc, detached;
-	struct format_tree	*ft;
 	struct environ_entry	*envent;
 	struct cmd_find_state	 fs;
 
@@ -93,12 +93,10 @@ cmd_new_window_exec(struct cmd *self, struct cmdq_item *item)
 	if (envent != NULL)
 		path = envent->value;
 
-	to_free = NULL;
 	if (args_has(args, 'c')) {
-		ft = format_create(item, 0);
-		format_defaults(ft, c, s, NULL, NULL);
-		cwd = to_free = format_expand(ft, args_get(args, 'c'));
-		format_free(ft);
+		cwd = args_get(args, 'c');
+		to_free = format_single(item, cwd, c, s, NULL, NULL);
+		cwd = to_free;
 	} else if (item->client != NULL && item->client->session == NULL)
 		cwd = item->client->cwd;
 	else
@@ -135,6 +133,7 @@ cmd_new_window_exec(struct cmd *self, struct cmdq_item *item)
 	}
 	if (!detached) {
 		session_select(s, wl->idx);
+		cmd_find_from_winlink(current, wl);
 		server_redraw_session_group(s);
 	} else
 		server_status_session_group(s);
@@ -142,27 +141,18 @@ cmd_new_window_exec(struct cmd *self, struct cmdq_item *item)
 	if (args_has(args, 'P')) {
 		if ((template = args_get(args, 'F')) == NULL)
 			template = NEW_WINDOW_TEMPLATE;
-
-		ft = format_create(item, 0);
-		format_defaults(ft, c, s, wl, NULL);
-
-		cp = format_expand(ft, template);
+		cp = format_single(item, template, c, s, wl, NULL);
 		cmdq_print(item, "%s", cp);
 		free(cp);
-
-		format_free(ft);
 	}
 
-	if (to_free != NULL)
-		free((void *)to_free);
-
-	cmd_find_from_winlink(&fs, s, wl);
+	cmd_find_from_winlink(&fs, wl);
 	hooks_insert(s->hooks, item, &fs, "after-new-window");
 
+	free(to_free);
 	return (CMD_RETURN_NORMAL);
 
 error:
-	if (to_free != NULL)
-		free((void *)to_free);
+	free(to_free);
 	return (CMD_RETURN_ERROR);
 }

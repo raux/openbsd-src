@@ -1,4 +1,4 @@
-/*	$OpenBSD: udf_vfsops.c,v 1.57 2016/09/24 18:38:23 tedu Exp $	*/
+/*	$OpenBSD: udf_vfsops.c,v 1.59 2017/04/20 14:13:00 visa Exp $	*/
 
 /*
  * Copyright (c) 2001, 2002 Scott Long <scottl@freebsd.org>
@@ -430,9 +430,8 @@ udf_mountfs(struct vnode *devvp, struct mount *mp, uint32_t lb, struct proc *p)
 	return (0);
 
 bail:
-	hashfree(ump->um_hashtbl, UDF_HASHTBLSIZE, M_UDFMOUNT);
-
 	if (ump != NULL) {
+		hashfree(ump->um_hashtbl, UDF_HASHTBLSIZE, M_UDFMOUNT);
 		free(ump, M_UDFMOUNT, 0);
 		mp->mnt_data = NULL;
 		mp->mnt_flag &= ~MNT_LOCAL;
@@ -639,7 +638,7 @@ udf_vget(struct mount *mp, ino_t ino, struct vnode **vpp)
 	vp->v_data = up;
 	vref(ump->um_devvp);
 
-	rrw_init(&up->u_lock, "unode");
+	rrw_init_flags(&up->u_lock, "unode", RWL_DUPOK);
 
 	/*
 	 * udf_hashins() will lock the vnode for us.

@@ -1,4 +1,4 @@
-/* $OpenBSD: md_init.h,v 1.9 2016/10/03 22:13:30 kettenis Exp $ */
+/* $OpenBSD: md_init.h,v 1.12 2017/08/11 20:13:31 guenther Exp $ */
 
 /*-
  * Copyright (c) 2001 Ross Harvey
@@ -33,23 +33,35 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#ifdef __PIC__
-	/* This nastyness derived from gcc3 output */
+/*
+ * arm overrides these because it uses %progbits instead of @progbits
+ */
+#define MD_DATA_SECTION_FLAGS_SYMBOL(section, flags, type, symbol)	\
+	extern __dso_hidden type symbol[];				\
+	__asm("	.section "section",\""flags"\",%progbits		\n" \
+	"	.balign 4						\n" \
+	#symbol":							\n" \
+	"	.previous")
+#define MD_DATA_SECTION_SYMBOL_VALUE(section, type, symbol, value)	\
+	extern __dso_hidden type symbol[];				\
+	__asm("	.section "section",\"aw\",%progbits			\n" \
+	"	.balign 4						\n" \
+	#symbol":							\n" \
+	"	.int "#value"						\n" \
+	"	.previous")
+#define MD_DATA_SECTION_FLAGS_VALUE(section, flags, value)		\
+	__asm("	.section "section",\""flags"\",%progbits		\n" \
+	"	.balign 4						\n" \
+	"	.int "#value"						\n" \
+	"	.previous")
+
 #define MD_SECT_CALL_FUNC(section, func) \
 	__asm (".section "#section", \"ax\"		\n" \
-	"	bl " #func "(PLT)			\n" \
+	"	movw	r0, #:lower16:" #func "- 1f - 8	\n" \
+	"	movt	r0, #:upper16:" #func "- 1f - 8	\n" \
+	"1:	add	r0, r0, pc			\n" \
+	"	blx	r0				\n" \
 	"	.previous")
-#else
-#define MD_SECT_CALL_FUNC(section, func) \
-	__asm (".section "#section", \"ax\"	\n" \
-	"	adr r0, 1f			\n" \
-	"	ldr r0, [r0]			\n" \
-	"	adr lr, 2f			\n" \
-	"	mov pc,	r0			\n" \
-	"1:	.word " #func "			\n" \
-	"2:					\n" \
-	"	.previous")
-#endif
 
 #define MD_SECTION_PROLOGUE(sect, entry_pt)	\
 	__asm (					\
@@ -145,6 +157,4 @@
 	"_dl_exit:				\n" \
 	"	mov	r12, #1			\n" \
 	"	swi	#0			\n" \
-	"_dl_printf:				\n" \
-	"	mov	pc, lr			\n" \
 	".previous");

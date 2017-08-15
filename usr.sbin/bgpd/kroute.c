@@ -1,4 +1,4 @@
-/*	$OpenBSD: kroute.c,v 1.210 2016/10/05 07:38:06 phessler Exp $ */
+/*	$OpenBSD: kroute.c,v 1.216 2017/07/24 11:00:01 friehm Exp $ */
 
 /*
  * Copyright (c) 2003, 2004 Henning Brauer <henning@openbsd.org>
@@ -36,6 +36,7 @@
 #include <unistd.h>
 
 #include "bgpd.h"
+#include "log.h"
 
 struct ktable		**krt;
 u_int			  krt_size;
@@ -874,10 +875,13 @@ kr_dispatch_msg(void)
 }
 
 int
-kr_nexthop_add(u_int rtableid, struct bgpd_addr *addr)
+kr_nexthop_add(u_int rtableid, struct bgpd_addr *addr, struct bgpd_config *conf)
 {
 	struct ktable		*kt;
 	struct knexthop_node	*h;
+
+	if (rtableid == 0)
+		rtableid = conf->default_tableid;
 
 	if ((kt = ktable_get(rtableid)) == NULL) {
 		log_warnx("kr_nexthop_add: non-existent rtableid %d", rtableid);
@@ -901,10 +905,14 @@ kr_nexthop_add(u_int rtableid, struct bgpd_addr *addr)
 }
 
 void
-kr_nexthop_delete(u_int rtableid, struct bgpd_addr *addr)
+kr_nexthop_delete(u_int rtableid, struct bgpd_addr *addr,
+    struct bgpd_config *conf)
 {
 	struct ktable		*kt;
 	struct knexthop_node	*kn;
+
+	if (rtableid == 0)
+		rtableid = conf->default_tableid;
 
 	if ((kt = ktable_get(rtableid)) == NULL) {
 		log_warnx("kr_nexthop_delete: non-existent rtableid %d",
@@ -2199,9 +2207,10 @@ knexthop_send_update(struct knexthop_node *kn)
 		kr = kn->kroute;
 		n.valid = kroute_validate(&kr->r);
 		n.connected = kr->r.flags & F_CONNECTED;
-		if ((n.gateway.v4.s_addr =
-		    kr->r.nexthop.s_addr) != 0)
+		if (kr->r.nexthop.s_addr != 0) {
 			n.gateway.aid = AID_INET;
+			n.gateway.v4.s_addr = kr->r.nexthop.s_addr;
+		}
 		if (n.connected) {
 			n.net.aid = AID_INET;
 			n.net.v4.s_addr = kr->r.prefix.s_addr;
@@ -2220,7 +2229,7 @@ knexthop_send_update(struct knexthop_node *kn)
 		}
 		if (n.connected) {
 			n.net.aid = AID_INET6;
-			memcpy(&n.net.v6, &kr6->r.nexthop,
+			memcpy(&n.net.v6, &kr6->r.prefix,
 			    sizeof(struct in6_addr));
 			n.netlen = kr6->r.prefixlen;
 		}
@@ -2437,8 +2446,8 @@ prefixlen2mask6(u_int8_t prefixlen)
 	return (&mask);
 }
 
-#define	ROUNDUP(a)	\
-    (((a) & (sizeof(long) - 1)) ? (1 + ((a) | (sizeof(long) - 1))) : (a))
+#define ROUNDUP(a) \
+	((a) > 0 ? (1 + (((a) - 1) | (sizeof(long) - 1))) : sizeof(long))
 
 void
 get_rtaddrs(int addrs, struct sockaddr *sa, struct sockaddr **rti_info)

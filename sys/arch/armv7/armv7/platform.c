@@ -1,4 +1,4 @@
-/*	$OpenBSD: platform.c,v 1.16 2016/10/05 22:06:48 kettenis Exp $	*/
+/*	$OpenBSD: platform.c,v 1.22 2017/03/07 15:38:11 kettenis Exp $	*/
 /*
  * Copyright (c) 2014 Patrick Wildt <patrick@blueri.se>
  *
@@ -27,9 +27,6 @@
 #include <arm/cortex/smc.h>
 
 #include "omap.h"
-#include "sunxi.h"
-#include "exynos.h"
-#include "vexpress.h"
 
 static struct armv7_platform *platform;
 
@@ -41,22 +38,10 @@ void	com_fdt_init_cons(void);
 void	pluart_init_cons(void);
 
 struct armv7_platform *omap_platform_match(void);
-struct armv7_platform *sunxi_platform_match(void);
-struct armv7_platform *exynos_platform_match(void);
-struct armv7_platform *vexpress_platform_match(void);
 
 struct armv7_platform * (*plat_match[])(void) = {
 #if NOMAP > 0
 	omap_platform_match,
-#endif
-#if NSUNXI > 0
-	sunxi_platform_match,
-#endif
-#if NEXYNOS > 0
-	exynos_platform_match,
-#endif
-#if NVEXPRESS > 0
-	vexpress_platform_match,
 #endif
 };
 
@@ -81,6 +66,7 @@ platform_init(void)
 		return;
 
 	cpuresetfn = platform_watchdog_reset;
+	powerdownfn = platform_powerdown;
 	if (platform->board_init)
 		platform->board_init();
 }
@@ -129,13 +115,6 @@ platform_powerdown(void)
 {
 	if (platform && platform->powerdown)
 		platform->powerdown();
-}
-
-void
-platform_disable_l2_if_needed(void)
-{
-	if (platform && platform->disable_l2_if_needed)
-		platform->disable_l2_if_needed();
 }
 
 struct board_dev *

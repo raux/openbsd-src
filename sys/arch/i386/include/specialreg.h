@@ -1,4 +1,4 @@
-/*	$OpenBSD: specialreg.h,v 1.58 2016/10/21 06:20:59 mlarkin Exp $	*/
+/*	$OpenBSD: specialreg.h,v 1.64 2017/08/12 19:53:37 mlarkin Exp $	*/
 /*	$NetBSD: specialreg.h,v 1.7 1994/10/27 04:16:26 cgd Exp $	*/
 
 /*-
@@ -320,19 +320,6 @@
 #define P6MSR_CTR0		0x0c1
 #define P6MSR_CTR1		0x0c2
 #define MSR_FSB_FREQ		0x0cd	/* Core Duo/Solo only */
-/*
- * for Core i Series and newer Xeons, see
- * http://www.intel.com/content/dam/www/public/us/en/
- * documents/white-papers/cpu-monitoring-dts-peci-paper.pdf
- */
-#define MSR_TEMPERATURE_TARGET	0x1a2	/* Core i Series, Newer Xeons */
-#define MSR_TEMPERATURE_TARGET_TJMAX(r) (((r) >> 16) & 0xff)
-/*
- * not documented anywhere, see intelcore_update_sensor()
- * only available Core Duo and Core Solo Processors
- */
-#define MSR_TEMPERATURE_TARGET_UNDOCUMENTED	0x0ee
-#define MSR_TEMPERATURE_TARGET_LOW_BIT_UNDOCUMENTED	0x40000000
 #define MSR_MTRRcap		0x0fe
 #define MTRRcap_FIXED		0x100	/* bit 8 - fixed MTRRs supported */
 #define MTRRcap_WC		0x400	/* bit 10 - WC type supported */
@@ -361,6 +348,43 @@
 #define MSR_THERM_STATUS_TEMP(msr)	((msr >> 16) & 0x7f)
 #define MSR_THERM2_CTL		0x19d	/* Pentium M */
 #define MSR_MISC_ENABLE		0x1a0
+/*
+ * MSR_MISC_ENABLE (0x1a0)
+ *
+ * Enable Fast Strings: enables fast REP MOVS/REP STORS (R/W)
+ * Enable TCC: Enable automatic thermal control circuit (R/W)
+ * Performance monitoring available: 1 if enabled (R/O)
+ * Branch trace storage unavailable: 1 if unsupported (R/O)
+ * Processor event based sampling unavailable: 1 if unsupported (R/O)
+ * Enhanced Intel SpeedStep technology enable: 1 to enable (R/W)
+ * Enable monitor FSM: 1 to enable MONITOR/MWAIT (R/W)
+ * Limit CPUID maxval: 1 to limit CPUID leaf nodes to 0x2 and lower (R/W)
+ * Enable xTPR message disable: 1 to disable xTPR messages
+ * XD bit disable: 1 to disable NX capability (bit 34, or bit 2 of %edx/%rdx)
+ */
+#define MISC_ENABLE_FAST_STRINGS		(1 << 0)
+#define MISC_ENABLE_TCC				(1 << 3)
+#define MISC_ENABLE_PERF_MON_AVAILABLE		(1 << 7)
+#define MISC_ENABLE_BTS_UNAVAILABLE		(1 << 11)
+#define MISC_ENABLE_PEBS_UNAVAILABLE		(1 << 12)
+#define MISC_ENABLE_EIST_ENABLED		(1 << 16)
+#define MISC_ENABLE_ENABLE_MONITOR_FSM		(1 << 18)
+#define MISC_ENABLE_LIMIT_CPUID_MAXVAL		(1 << 22)
+#define MISC_ENABLE_xTPR_MESSAGE_DISABLE	(1 << 23)
+#define MISC_ENABLE_XD_BIT_DISABLE		(1 << 2)
+/*
+ * for Core i Series and newer Xeons, see
+ * http://www.intel.com/content/dam/www/public/us/en/
+ * documents/white-papers/cpu-monitoring-dts-peci-paper.pdf
+ */
+#define MSR_TEMPERATURE_TARGET	0x1a2	/* Core i Series, Newer Xeons */
+#define MSR_TEMPERATURE_TARGET_TJMAX(r) (((r) >> 16) & 0xff)
+/*
+ * not documented anywhere, see intelcore_update_sensor()
+ * only available Core Duo and Core Solo Processors
+ */
+#define MSR_TEMPERATURE_TARGET_UNDOCUMENTED	0x0ee
+#define MSR_TEMPERATURE_TARGET_LOW_BIT_UNDOCUMENTED	0x40000000
 #define MSR_DEBUGCTLMSR		0x1d9
 #define MSR_LASTBRANCHFROMIP	0x1db
 #define MSR_LASTBRANCHTOIP	0x1dc
@@ -703,6 +727,12 @@
 #define	C3_CRYPT_CWLO_KEY192		0x0000040c	/* 192bit, 12 rds */
 #define	C3_CRYPT_CWLO_KEY256		0x0000080e	/* 256bit, 15 rds */
 
+/* Intel Silicon Debug */
+#define IA32_DEBUG_INTERFACE		0xc80
+#define IA32_DEBUG_INTERFACE_ENABLE	0x00000001
+#define IA32_DEBUG_INTERFACE_LOCK	0x40000000
+#define IA32_DEBUG_INTERFACE_MASK	0x80000000
+
 /*
  * VMX
  */
@@ -1038,9 +1068,123 @@
  * SVM
  */
 #define MSR_AMD_VM_CR			0xc0010114
+#define MSR_AMD_VM_HSAVE_PA		0xc0010117
 #define CPUID_AMD_SVM_CAP		0x8000000A
 #define AMD_SVMDIS			0x10
 #define AMD_SVM_NESTED_PAGING_CAP	(1 << 0)
+
+/*
+ * SVM : VMCB intercepts
+ */
+#define SVM_INTERCEPT_CR0_READ		(1UL << 0)
+#define SVM_INTERCEPT_CR1_READ		(1UL << 1)
+#define SVM_INTERCEPT_CR2_READ		(1UL << 2)
+#define SVM_INTERCEPT_CR3_READ		(1UL << 2)
+#define SVM_INTERCEPT_CR4_READ		(1UL << 4)
+#define SVM_INTERCEPT_CR5_READ		(1UL << 5)
+#define SVM_INTERCEPT_CR6_READ		(1UL << 6)
+#define SVM_INTERCEPT_CR7_READ		(1UL << 7)
+#define SVM_INTERCEPT_CR8_READ		(1UL << 8)
+#define SVM_INTERCEPT_CR9_READ		(1UL << 9)
+#define SVM_INTERCEPT_CR10_READ		(1UL << 10)
+#define SVM_INTERCEPT_CR11_READ		(1UL << 11)
+#define SVM_INTERCEPT_CR12_READ		(1UL << 12)
+#define SVM_INTERCEPT_CR13_READ		(1UL << 13)
+#define SVM_INTERCEPT_CR14_READ		(1UL << 14)
+#define SVM_INTERCEPT_CR15_READ		(1UL << 15)
+#define SVM_INTERCEPT_CR0_WRITE		(1UL << 16)
+#define SVM_INTERCEPT_CR1_WRITE		(1UL << 17)
+#define SVM_INTERCEPT_CR2_WRITE		(1UL << 18)
+#define SVM_INTERCEPT_CR3_WRITE		(1UL << 19)
+#define SVM_INTERCEPT_CR4_WRITE		(1UL << 20)
+#define SVM_INTERCEPT_CR5_WRITE		(1UL << 21)
+#define SVM_INTERCEPT_CR6_WRITE		(1UL << 22)
+#define SVM_INTERCEPT_CR7_WRITE		(1UL << 23)
+#define SVM_INTERCEPT_CR8_WRITE		(1UL << 24)
+#define SVM_INTERCEPT_CR9_WRITE		(1UL << 25)
+#define SVM_INTERCEPT_CR10_WRITE	(1UL << 26)
+#define SVM_INTERCEPT_CR11_WRITE	(1UL << 27)
+#define SVM_INTERCEPT_CR12_WRITE	(1UL << 28)
+#define SVM_INTERCEPT_CR13_WRITE	(1UL << 29)
+#define SVM_INTERCEPT_CR14_WRITE	(1UL << 30)
+#define SVM_INTERCEPT_CR15_WRITE	(1UL << 31)
+#define SVM_INTERCEPT_DR0_READ		(1UL << 0)
+#define SVM_INTERCEPT_DR1_READ		(1UL << 1)
+#define SVM_INTERCEPT_DR2_READ		(1UL << 2)
+#define SVM_INTERCEPT_DR3_READ		(1UL << 2)
+#define SVM_INTERCEPT_DR4_READ		(1UL << 4)
+#define SVM_INTERCEPT_DR5_READ		(1UL << 5)
+#define SVM_INTERCEPT_DR6_READ		(1UL << 6)
+#define SVM_INTERCEPT_DR7_READ		(1UL << 7)
+#define SVM_INTERCEPT_DR8_READ		(1UL << 8)
+#define SVM_INTERCEPT_DR9_READ		(1UL << 9)
+#define SVM_INTERCEPT_DR10_READ		(1UL << 10)
+#define SVM_INTERCEPT_DR11_READ		(1UL << 11)
+#define SVM_INTERCEPT_DR12_READ		(1UL << 12)
+#define SVM_INTERCEPT_DR13_READ		(1UL << 13)
+#define SVM_INTERCEPT_DR14_READ		(1UL << 14)
+#define SVM_INTERCEPT_DR15_READ		(1UL << 15)
+#define SVM_INTERCEPT_DR0_WRITE		(1UL << 16)
+#define SVM_INTERCEPT_DR1_WRITE		(1UL << 17)
+#define SVM_INTERCEPT_DR2_WRITE		(1UL << 18)
+#define SVM_INTERCEPT_DR3_WRITE		(1UL << 19)
+#define SVM_INTERCEPT_DR4_WRITE		(1UL << 20)
+#define SVM_INTERCEPT_DR5_WRITE		(1UL << 21)
+#define SVM_INTERCEPT_DR6_WRITE		(1UL << 22)
+#define SVM_INTERCEPT_DR7_WRITE		(1UL << 23)
+#define SVM_INTERCEPT_DR8_WRITE		(1UL << 24)
+#define SVM_INTERCEPT_DR9_WRITE		(1UL << 25)
+#define SVM_INTERCEPT_DR10_WRITE	(1UL << 26)
+#define SVM_INTERCEPT_DR11_WRITE	(1UL << 27)
+#define SVM_INTERCEPT_DR12_WRITE	(1UL << 28)
+#define SVM_INTERCEPT_DR13_WRITE	(1UL << 29)
+#define SVM_INTERCEPT_DR14_WRITE	(1UL << 30)
+#define SVM_INTERCEPT_DR15_WRITE	(1UL << 31)
+#define SVM_INTERCEPT_INTR		(1UL << 0)
+#define SVM_INTERCEPT_NMI		(1UL << 1)
+#define SVM_INTERCEPT_SMI		(1UL << 2)
+#define SVM_INTERCEPT_INIT		(1UL << 3)
+#define SVM_INTERCEPT_VINTR		(1UL << 4)
+#define SVM_INTERCEPT_CR0_SEL_WRITE	(1UL << 5)
+#define SVM_INTERCEPT_IDTR_READ		(1UL << 6)
+#define SVM_INTERCEPT_GDTR_READ		(1UL << 7)
+#define SVM_INTERCEPT_LDTR_READ		(1UL << 8)
+#define SVM_INTERCEPT_TR_READ		(1UL << 9)
+#define SVM_INTERCEPT_IDTR_WRITE	(1UL << 10)
+#define SVM_INTERCEPT_GDTR_WRITE	(1UL << 11)
+#define SVM_INTERCEPT_LDTR_WRITE	(1UL << 12)
+#define SVM_INTERCEPT_TR_WRITE		(1UL << 13)
+#define SVM_INTERCEPT_RDTSC		(1UL << 14)
+#define SVM_INTERCEPT_RDPMC		(1UL << 15)
+#define SVM_INTERCEPT_PUSHF		(1UL << 16)
+#define SVM_INTERCEPT_POPF		(1UL << 17)
+#define SVM_INTERCEPT_CPUID		(1UL << 18)
+#define SVM_INTERCEPT_RSM		(1UL << 19)
+#define SVM_INTERCEPT_IRET		(1UL << 20)
+#define SVM_INTERCEPT_INTN		(1UL << 21)
+#define SVM_INTERCEPT_INVD		(1UL << 22)
+#define SVM_INTERCEPT_PAUSE		(1UL << 23)
+#define SVM_INTERCEPT_HLT		(1UL << 24)
+#define SVM_INTERCEPT_INVLPG		(1UL << 25)
+#define SVM_INTERCEPT_INVLPGA		(1UL << 26)
+#define SVM_INTERCEPT_INOUT		(1UL << 27)
+#define SVM_INTERCEPT_MSR		(1UL << 28)
+#define SVM_INTERCEPT_TASK_SWITCH	(1UL << 29)
+#define SVM_INTERCEPT_FERR_FREEZE	(1UL << 30)
+#define SVM_INTERCEPT_SHUTDOWN		(1UL << 31)
+#define SVM_INTERCEPT_VMRUN		(1UL << 0)
+#define SVM_INTERCEPT_VMMCALL		(1UL << 1)
+#define SVM_INTERCEPT_VMLOAD		(1UL << 2)
+#define SVM_INTERCEPT_VMSAVE		(1UL << 3)
+#define SVM_INTERCEPT_STGI		(1UL << 4)
+#define SVM_INTERCEPT_CLGI		(1UL << 5)
+#define SVM_INTERCEPT_SKINIT		(1UL << 6)
+#define SVM_INTERCEPT_RDTSCP		(1UL << 7)
+#define SVM_INTERCEPT_ICEBP		(1UL << 8)
+#define SVM_INTERCEPT_WBINVD		(1UL << 9)
+#define SVM_INTERCEPT_MONITOR		(1UL << 10)
+#define SVM_INTERCEPT_MWAIT_UNCOND	(1UL << 11)
+#define SVM_INTERCEPT_MWAIT_COND	(1UL << 12)
 
 /*
  * PAT

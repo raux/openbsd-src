@@ -1,4 +1,4 @@
-/*	$OpenBSD: uhci.c,v 1.139 2016/09/15 02:00:17 dlg Exp $	*/
+/*	$OpenBSD: uhci.c,v 1.143 2017/05/15 10:52:08 mpi Exp $	*/
 /*	$NetBSD: uhci.c,v 1.172 2003/02/23 04:19:26 simonb Exp $	*/
 /*	$FreeBSD: src/sys/dev/usb/uhci.c,v 1.33 1999/11/17 22:33:41 n_hibma Exp $	*/
 
@@ -119,7 +119,6 @@ usbd_status	uhci_alloc_std_chain(struct uhci_softc *, u_int,
 		    struct usbd_xfer *, struct uhci_soft_td **,
 		    struct uhci_soft_td **);
 void		uhci_poll_hub(void *);
-void		uhci_waitintr(struct uhci_softc *, struct usbd_xfer *);
 void		uhci_check_intr(struct uhci_softc *, struct usbd_xfer *);
 void		uhci_idone(struct usbd_xfer *);
 
@@ -871,7 +870,7 @@ uhci_add_hs_ctrl(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *eqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_add_hs_ctrl: sqh=%p\n", sqh));
 	eqh = sc->sc_hctl_end;
@@ -891,7 +890,7 @@ uhci_remove_hs_ctrl(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *pqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_remove_hs_ctrl: sqh=%p\n", sqh));
 #ifdef UHCI_CTL_LOOP
@@ -924,7 +923,7 @@ uhci_add_ls_ctrl(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *eqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_add_ls_ctrl: sqh=%p\n", sqh));
 	eqh = sc->sc_lctl_end;
@@ -941,7 +940,7 @@ uhci_remove_ls_ctrl(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *pqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_remove_ls_ctrl: sqh=%p\n", sqh));
 	/* See comment in uhci_remove_hs_ctrl() */
@@ -963,7 +962,7 @@ uhci_add_bulk(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *eqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_add_bulk: sqh=%p\n", sqh));
 	eqh = sc->sc_bulk_end;
@@ -981,7 +980,7 @@ uhci_remove_bulk(struct uhci_softc *sc, struct uhci_soft_qh *sqh)
 {
 	struct uhci_soft_qh *pqh;
 
-	SPLUSBCHECK;
+	splsoftassert(IPL_SOFTUSB);
 
 	DPRINTFN(10, ("uhci_remove_bulk: sqh=%p\n", sqh));
 	uhci_rem_loop(sc);
@@ -1337,38 +1336,6 @@ uhci_timeout_task(void *addr)
 	splx(s);
 }
 
-/*
- * Wait here until controller claims to have an interrupt.
- * Then call uhci_intr and return.  Use timeout to avoid waiting
- * too long.
- * Only used during boot when interrupts are not enabled yet.
- */
-void
-uhci_waitintr(struct uhci_softc *sc, struct usbd_xfer *xfer)
-{
-	int timo;
-	u_int32_t intrs;
-
-	xfer->status = USBD_IN_PROGRESS;
-	for (timo = xfer->timeout; timo >= 0; timo--) {
-		usb_delay_ms(&sc->sc_bus, 1);
-		if (sc->sc_bus.dying)
-			break;
-		intrs = UREAD2(sc, UHCI_STS) & UHCI_STS_ALLINTRS;
-		DPRINTFN(15,("uhci_waitintr: 0x%04x\n", intrs));
-		if (intrs) {
-			uhci_intr1(sc);
-			if (xfer->status != USBD_IN_PROGRESS)
-				return;
-		}
-	}
-
-	/* Timeout */
-	DPRINTF(("uhci_waitintr: timeout\n"));
-	xfer->status = USBD_TIMEOUT;
-	usb_transfer_complete(xfer);
-}
-
 void
 uhci_poll(struct usbd_bus *bus)
 {
@@ -1647,7 +1614,6 @@ uhci_device_bulk_start(struct usbd_xfer *xfer)
 	struct uhci_soft_qh *sqh;
 	usbd_status err;
 	u_int len;
-	int endpt;
 	int s;
 
 	DPRINTFN(3, ("uhci_device_bulk_start: xfer=%p len=%u flags=%d ux=%p\n",
@@ -1662,7 +1628,6 @@ uhci_device_bulk_start(struct usbd_xfer *xfer)
 #endif
 
 	len = xfer->length;
-	endpt = xfer->pipe->endpoint->edesc->bEndpointAddress;
 	sqh = upipe->u.bulk.sqh;
 
 	err = uhci_alloc_std_chain(sc, len, xfer, &data, &dataend);
@@ -1708,9 +1673,6 @@ uhci_device_bulk_start(struct usbd_xfer *xfer)
 		uhci_dump_tds(data);
 	}
 #endif
-
-	if (sc->sc_bus.use_polling)
-		uhci_waitintr(sc, xfer);
 
 	return (USBD_IN_PROGRESS);
 }
@@ -1843,9 +1805,6 @@ uhci_device_ctrl_start(struct usbd_xfer *xfer)
 	if (err)
 		return (err);
 
-	if (sc->sc_bus.use_polling)
-		uhci_waitintr(sc, xfer);
-
 	return (USBD_IN_PROGRESS);
 }
 
@@ -1875,7 +1834,6 @@ uhci_device_intr_start(struct usbd_xfer *xfer)
 	struct uhci_soft_td *data, *dataend;
 	struct uhci_soft_qh *sqh;
 	usbd_status err;
-	int endpt;
 	int i, s;
 
 	if (sc->sc_bus.dying)
@@ -1888,8 +1846,6 @@ uhci_device_intr_start(struct usbd_xfer *xfer)
 	if (xfer->rqflags & URQ_REQUEST)
 		panic("uhci_device_intr_start: a request");
 #endif
-
-	endpt = xfer->pipe->endpoint->edesc->bEndpointAddress;
 
 	upipe->u.intr.isread = usbd_xfer_isread(xfer);
 
@@ -1936,9 +1892,6 @@ uhci_device_intr_start(struct usbd_xfer *xfer)
 		uhci_dump_qh(upipe->u.intr.qhs[0]);
 	}
 #endif
-
-	if (sc->sc_bus.use_polling)
-		uhci_waitintr(sc, xfer);
 
 	return (USBD_IN_PROGRESS);
 }
@@ -2258,11 +2211,6 @@ uhci_device_isoc_start(struct usbd_xfer *xfer)
 	uhci_add_intr_list(sc, ux);
 
 	splx(s);
-
-	if (sc->sc_bus.use_polling) {
-		DPRINTF(("Starting uhci isoc xfer with polling. Bad idea?\n"));
-		uhci_waitintr(sc, xfer);
-	}
 
 	return (USBD_IN_PROGRESS);
 }
@@ -3236,7 +3184,7 @@ uhci_root_ctrl_start(struct usbd_xfer *xfer)
 	s = splusb();
 	usb_transfer_complete(xfer);
 	splx(s);
-	return (USBD_IN_PROGRESS);
+	return (err);
 }
 
 /* Abort a root control request. */

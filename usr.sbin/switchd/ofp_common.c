@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofp_common.c,v 1.1 2016/10/07 08:49:53 reyk Exp $	*/
+/*	$OpenBSD: ofp_common.c,v 1.10 2016/12/22 15:31:43 rzalamena Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -42,6 +42,279 @@
 
 #include "switchd.h"
 #include "ofp_map.h"
+
+int		ofp_setversion(struct switch_connection *, int);
+
+int
+ofp_validate_header(struct switchd *sc,
+    struct sockaddr_storage *src, struct sockaddr_storage *dst,
+    struct ofp_header *oh, uint8_t version)
+{
+	struct constmap	*tmap;
+
+	/* For debug, don't verify the header if the version is unset */
+	if (version != OFP_V_0 &&
+	    (oh->oh_version != version ||
+	    oh->oh_type >= OFP_T_TYPE_MAX))
+		return (-1);
+
+	switch (version) {
+	case OFP_V_1_0:
+	case OFP_V_1_1:
+		tmap = ofp10_t_map;
+		break;
+	case OFP_V_1_3:
+	default:
+		tmap = ofp_t_map;
+		break;
+	}
+
+	log_debug("%s > %s: version %s type %s length %u xid %u",
+	    print_host(src, NULL, 0),
+	    print_host(dst, NULL, 0),
+	    print_map(oh->oh_version, ofp_v_map),
+	    print_map(oh->oh_type, tmap),
+	    ntohs(oh->oh_length), ntohl(oh->oh_xid));
+
+	return (0);
+}
+
+int
+ofp_validate(struct switchd *sc,
+    struct sockaddr_storage *src, struct sockaddr_storage *dst,
+    struct ofp_header *oh, struct ibuf *ibuf, uint8_t version)
+{
+	switch (version) {
+	case OFP_V_1_0:
+		return (ofp10_validate(sc, src, dst, oh, ibuf));
+	case OFP_V_1_3:
+		return (ofp13_validate(sc, src, dst, oh, ibuf));
+	default:
+		return (-1);
+	}
+
+	/* NOTREACHED */
+}
+
+int
+ofp_output(struct switch_connection *con, struct ofp_header *oh,
+    struct ibuf *obuf)
+{
+	struct ibuf	*buf;
+
+	if ((buf = ibuf_static()) == NULL)
+		return (-1);
+	if ((oh != NULL) &&
+	    (ibuf_add(buf, oh, sizeof(*oh)) == -1)) {
+		ibuf_release(buf);
+		return (-1);
+	}
+	if ((obuf != NULL) &&
+	    (ibuf_cat(buf, obuf) == -1)) {
+		ibuf_release(buf);
+		return (-1);
+	}
+
+	ofrelay_write(con, buf);
+
+	return (0);
+}
+
+int
+ofp_send_hello(struct switchd *sc, struct switch_connection *con, int version)
+{
+	struct ofp_hello_element_header	*he;
+	struct ofp_header		*oh;
+	struct ibuf			*ibuf;
+	size_t				 hstart, hend;
+	uint32_t			*bmp;
+	int				 rv = -1;
+
+	if ((ibuf = ibuf_static()) == NULL ||
+	    (oh = ibuf_advance(ibuf, sizeof(*oh))) == NULL ||
+	    (he = ibuf_advance(ibuf, sizeof(*he))) == NULL)
+		goto done;
+
+	/* Write down all versions we support. */
+	hstart = ibuf->wpos;
+	if ((bmp = ibuf_advance(ibuf, sizeof(*bmp))) == NULL)
+		goto done;
+
+	*bmp = htonl((1 << OFP_V_1_0) | (1 << OFP_V_1_3));
+	hend = ibuf->wpos;
+
+	/* Fill the headers. */
+	oh->oh_version = version;
+	oh->oh_type = OFP_T_HELLO;
+	oh->oh_length = htons(ibuf_length(ibuf));
+	oh->oh_xid = htonl(con->con_xidnxt++);
+	he->he_type = htons(OFP_HELLO_T_VERSION_BITMAP);
+	he->he_length = htons(sizeof(*he) + (hend - hstart));
+
+	if (ofp_validate(sc, &con->con_local, &con->con_peer, oh, ibuf,
+	    version) != 0)
+		goto done;
+
+	rv = ofp_output(con, NULL, ibuf);
+
+ done:
+	ibuf_free(ibuf);
+	return (rv);
+}
+
+int
+ofp_validate_hello(struct switchd *sc,
+    struct sockaddr_storage *src, struct sockaddr_storage *dst,
+    struct ofp_header *oh, struct ibuf *ibuf)
+{
+	struct ofp_hello_element_header	*he;
+	uint32_t			*bmp;
+	off_t				 poff;
+	int				 helen, i, ver;
+
+	/* No extra element headers. */
+	if (ntohs(oh->oh_length) == sizeof(*oh))
+		return (0);
+
+	/* Test for supported element headers. */
+	if ((he = ibuf_seek(ibuf, sizeof(*oh), sizeof(*he))) == NULL)
+		return (-1);
+	if (he->he_type != htons(OFP_HELLO_T_VERSION_BITMAP))
+		return (-1);
+
+	log_debug("\tversion bitmap:");
+
+	/* Validate header sizes. */
+	helen = ntohs(he->he_length);
+	if (helen < (int)sizeof(*he))
+		return (-1);
+	else if (helen == sizeof(*he))
+		return (0);
+
+	helen -= sizeof(*he);
+	/* Invalid bitmap size. */
+	if ((helen % sizeof(*bmp)) != 0)
+		return (-1);
+
+	ver = 0;
+	poff = sizeof(*oh) + sizeof(*he);
+	while (helen > 0) {
+		if ((bmp = ibuf_seek(ibuf, poff, sizeof(*bmp))) == NULL)
+			return (-1);
+
+		for (i = 0; i < 32; i++, ver++) {
+			if ((ntohl(*bmp) & (1 << i)) == 0)
+				continue;
+
+			log_debug("\t\tversion %s",
+			    print_map(ver, ofp_v_map));
+		}
+
+		helen -= sizeof(*bmp);
+		poff += sizeof(*bmp);
+	}
+
+	return (0);
+}
+
+int
+ofp_setversion(struct switch_connection *con, int version)
+{
+	switch (version) {
+	case OFP_V_1_0:
+	case OFP_V_1_3:
+		con->con_version = version;
+		return (0);
+
+	default:
+		return (-1);
+	}
+}
+
+int
+ofp_recv_hello(struct switchd *sc, struct switch_connection *con,
+    struct ofp_header *oh, struct ibuf *ibuf)
+{
+	struct ofp_hello_element_header	*he;
+	uint32_t			*bmp;
+	off_t				 poff;
+	int				 helen, i, ver;
+
+	/* No extra element headers, just use the header version. */
+	if (ntohs(oh->oh_length) == sizeof(*oh))
+		return (ofp_setversion(con, oh->oh_version));
+
+	/* Read the element header. */
+	if ((he = ibuf_seek(ibuf, sizeof(*oh), sizeof(*he))) == NULL)
+		return (-1);
+
+	/* We don't support anything else than the version bitmap. */
+	if (he->he_type != htons(OFP_HELLO_T_VERSION_BITMAP))
+		return (-1);
+
+	/* Validate header sizes. */
+	helen = ntohs(he->he_length);
+	if (helen < (int)sizeof(*he))
+		return (-1);
+	else if (helen == sizeof(*he))
+		return (ofp_setversion(con, oh->oh_version));
+
+	helen -= sizeof(*he);
+	/* Invalid bitmap size. */
+	if ((helen % sizeof(*bmp)) != 0)
+		return (-1);
+
+	ver = 0;
+	poff = sizeof(*oh) + sizeof(*he);
+
+	/* Loop through the bitmaps and choose the higher version. */
+	while (helen > 0) {
+		if ((bmp = ibuf_seek(ibuf, poff, sizeof(*bmp))) == NULL)
+			return (-1);
+
+		for (i = 0; i < 32; i++, ver++) {
+			if ((ntohl(*bmp) & (1 << i)) == 0)
+				continue;
+
+			ofp_setversion(con, ver);
+		}
+
+		helen -= sizeof(*bmp);
+		poff += sizeof(*bmp);
+	}
+
+	/* Check if we have set any version, otherwise fallback. */
+	if (con->con_version == OFP_V_0)
+		return (ofp_setversion(con, oh->oh_version));
+
+	return (0);
+}
+
+int
+ofp_send_featuresrequest(struct switchd *sc, struct switch_connection *con)
+{
+	struct ofp_header	*oh;
+	struct ibuf		*ibuf;
+	int			 rv = -1;
+
+	if ((ibuf = ibuf_static()) == NULL ||
+	    (oh = ibuf_advance(ibuf, sizeof(*oh))) == NULL)
+		return (-1);
+
+	oh->oh_version = con->con_version;
+	oh->oh_type = OFP_T_FEATURES_REQUEST;
+	oh->oh_length = htons(ibuf_length(ibuf));
+	oh->oh_xid = htonl(con->con_xidnxt++);
+	if (ofp_validate(sc, &con->con_local, &con->con_peer, oh, ibuf,
+	    con->con_version) != 0)
+		goto done;
+
+	rv = ofp_output(con, NULL, ibuf);
+
+ done:
+	ibuf_free(ibuf);
+	return (rv);
+}
 
 /* Appends an action with just the generic header. */
 int
@@ -823,15 +1096,50 @@ oxm_ipv6exthdr(struct ibuf *ibuf, int hasmask, uint16_t exthdr, uint16_t mask)
 	return (0);
 }
 
+/*
+ * Appends a new instruction with hlen size.
+ *
+ * Remember to set the instruction length (i->i_len) if it has more data,
+ * like ofp_instruction_actions, ofp_instruction_goto_table etc...
+ */
+struct ofp_instruction *
+ofp_instruction(struct ibuf *ibuf, uint16_t type, uint16_t hlen)
+{
+	struct ofp_instruction	*oi;
+
+	if ((oi = ibuf_advance(ibuf, hlen)) == NULL)
+		return (NULL);
+
+	oi->i_type = htons(type);
+	oi->i_len = htons(hlen);
+	return (oi);
+}
+
+struct multipart_message *
+ofp_multipart_lookup(struct switch_connection *con, uint32_t xid)
+{
+	struct multipart_message	*mm;
+
+	SLIST_FOREACH(mm, &con->con_mmlist, mm_entry) {
+		if (mm->mm_xid != xid)
+			continue;
+
+		return (mm);
+	}
+
+	return (NULL);
+}
+
 int
 ofp_multipart_add(struct switch_connection *con, uint32_t xid, uint8_t type)
 {
 	struct multipart_message	*mm;
 
-	/* A multipart reply have the same xid and type in all parts. */
-	SLIST_FOREACH(mm, &con->con_mmlist, mm_entry) {
-		if (mm->mm_xid != xid)
-			continue;
+	if ((mm = ofp_multipart_lookup(con, xid)) != NULL) {
+		/*
+		 * A multipart reply has the same xid and type, otherwise
+		 * something went wrong.
+		 */
 		if (mm->mm_type != type)
 			return (-1);
 
@@ -879,4 +1187,303 @@ ofp_multipart_clear(struct switch_connection *con)
 		mm = SLIST_FIRST(&con->con_mmlist);
 		ofp_multipart_free(con, mm);
 	}
+}
+
+struct switch_table *
+switch_tablelookup(struct switch_connection *con, int table)
+{
+	struct switch_table		*st;
+
+	TAILQ_FOREACH(st, &con->con_stlist, st_entry) {
+		if (st->st_table == table)
+			return (st);
+	}
+
+	return (NULL);
+}
+
+struct switch_table *
+switch_newtable(struct switch_connection *con, int table)
+{
+	struct switch_table		*st;
+
+	if ((st = calloc(1, sizeof(*st))) == NULL)
+		return (NULL);
+
+	st->st_table = table;
+	TAILQ_INSERT_TAIL(&con->con_stlist, st, st_entry);
+
+	return (st);
+}
+
+void
+switch_deltable(struct switch_connection *con, struct switch_table *st)
+{
+	TAILQ_REMOVE(&con->con_stlist, st, st_entry);
+	free(st);
+}
+
+void
+switch_freetables(struct switch_connection *con)
+{
+	struct switch_table		*st;
+
+	while (!TAILQ_EMPTY(&con->con_stlist)) {
+		st = TAILQ_FIRST(&con->con_stlist);
+		switch_deltable(con, st);
+	}
+}
+
+int
+oflowmod_state(struct oflowmod_ctx *ctx, unsigned int old, unsigned int new)
+{
+	if (ctx->ctx_state != old)
+		return (-1);
+	ctx->ctx_state = new;
+	return (0);
+}
+
+int
+oflowmod_err(struct oflowmod_ctx *ctx, const char *func, int line)
+{
+	log_debug("%s: function %s line %d state %d",
+	    __func__, func, line, ctx->ctx_state);
+
+	if (ctx->ctx_state >= OFMCTX_ERR)
+		return (-1);
+	if (ctx->ctx_flags & OFMCTX_IBUF)
+		ibuf_release(ctx->ctx_ibuf);
+	ctx->ctx_state = OFMCTX_ERR;
+	return (-1);
+}
+
+struct ibuf *
+oflowmod_open(struct oflowmod_ctx *ctx, struct switch_connection *con,
+    struct ibuf *ibuf, uint8_t version)
+{
+	struct ofp_flow_mod	*fm;
+	struct switch_connection conb;
+
+	switch (version) {
+	case OFP_V_0:
+	case OFP_V_1_3:
+		version = OFP_V_1_3;
+		break;
+	default:
+		log_warnx("%s: unsupported version 0x%02x", __func__, version);
+		return (NULL);
+	}
+
+	memset(ctx, 0, sizeof(*ctx));
+
+	if (oflowmod_state(ctx, OFMCTX_INIT, OFMCTX_OPEN) == -1)
+		goto err;
+
+	if (ibuf == NULL) {
+		ctx->ctx_flags |= OFMCTX_IBUF;
+		if ((ibuf = ibuf_static()) == NULL)
+			goto err;
+	}
+
+	ctx->ctx_ibuf = ibuf;
+	ctx->ctx_start = ibuf->wpos;
+
+	/*
+	 * The connection is not strictly required and might not be
+	 * available in other places;  just default to an xid 0.
+	 */
+	if (con == NULL) {
+		con = &conb;
+		memset(con, 0, sizeof(*con));
+	}
+
+	/* uses defaults, can be changed by accessing fm later */
+	if ((fm = ofp13_flowmod(con, ibuf,
+	    OFP_FLOWCMD_ADD, 0, 0, 0, 0)) == NULL)
+		goto err;
+
+	ctx->ctx_fm = fm;
+
+	return (ctx->ctx_ibuf);
+
+ err:
+	(void)oflowmod_err(ctx, __func__, __LINE__);
+	return (NULL);
+}
+
+int
+oflowmod_mopen(struct oflowmod_ctx *ctx)
+{
+	if (oflowmod_state(ctx, OFMCTX_OPEN, OFMCTX_MOPEN) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	ctx->ctx_ostart = ctx->ctx_start +
+	    offsetof(struct ofp_flow_mod, fm_match);
+
+	return (0);
+}
+
+int
+oflowmod_mclose(struct oflowmod_ctx *ctx)
+{
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+	struct ofp_flow_mod	*fm = ctx->ctx_fm;
+	size_t			 omlen, padding;
+
+	if (oflowmod_state(ctx, OFMCTX_MOPEN, OFMCTX_MCLOSE) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	ctx->ctx_oend = ibuf->wpos;
+	omlen = ctx->ctx_oend - ctx->ctx_ostart;
+
+	/* Update match length */
+	fm->fm_match.om_length = htons(omlen);
+
+	padding = OFP_ALIGN(omlen) - omlen;
+	if (padding) {
+		ctx->ctx_oend += padding;
+		if (ibuf_advance(ibuf, padding) == NULL)
+			return (oflowmod_err(ctx, __func__, __LINE__));
+	}
+
+	return (0);
+}
+
+int
+oflowmod_iopen(struct oflowmod_ctx *ctx)
+{
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+
+	if (ctx->ctx_state < OFMCTX_MOPEN &&
+	    (oflowmod_mopen(ctx) == -1))
+		return (oflowmod_err(ctx, __func__, __LINE__));
+	if (ctx->ctx_state < OFMCTX_MCLOSE &&
+	    (oflowmod_mclose(ctx) == -1))
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	if (oflowmod_state(ctx, OFMCTX_MCLOSE, OFMCTX_IOPEN) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	ctx->ctx_istart = ibuf->wpos;
+
+	return (0);
+}
+
+int
+oflowmod_instruction(struct oflowmod_ctx *ctx, unsigned int type)
+{
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+	struct ofp_instruction	*oi;
+	size_t			 len;
+
+	if (ctx->ctx_state < OFMCTX_IOPEN &&
+	    (oflowmod_iopen(ctx) == -1))
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	if (oflowmod_state(ctx, OFMCTX_IOPEN, OFMCTX_IOPEN) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	if (ctx->ctx_oi != NULL && oflowmod_instructionclose(ctx) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	ctx->ctx_oioff = ibuf->wpos;
+
+	switch (type) {
+	case OFP_INSTRUCTION_T_GOTO_TABLE:
+		len = sizeof(struct ofp_instruction_goto_table);
+		break;
+	case OFP_INSTRUCTION_T_WRITE_META:
+		len = sizeof(struct ofp_instruction_write_metadata);
+		break;
+	case OFP_INSTRUCTION_T_WRITE_ACTIONS:
+	case OFP_INSTRUCTION_T_APPLY_ACTIONS:
+	case OFP_INSTRUCTION_T_CLEAR_ACTIONS:
+		len = sizeof(struct ofp_instruction_actions);
+		break;
+	case OFP_INSTRUCTION_T_METER:
+		len = sizeof(struct ofp_instruction_meter);
+		break;
+	case OFP_INSTRUCTION_T_EXPERIMENTER:
+		len = sizeof(struct ofp_instruction_experimenter);
+		break;
+	default:
+		return (oflowmod_err(ctx, __func__, __LINE__));
+	}
+
+	if ((oi = ofp_instruction(ibuf, type, len)) == NULL)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	ctx->ctx_oi = oi;
+
+	return (0);
+}
+
+int
+oflowmod_instructionclose(struct oflowmod_ctx *ctx)
+{
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+	struct ofp_instruction	*oi = ctx->ctx_oi;
+	size_t			 oilen;
+
+	if (ctx->ctx_state < OFMCTX_IOPEN || oi == NULL)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	oilen = ibuf->wpos - ctx->ctx_oioff;
+
+	if (oilen > UINT16_MAX)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	oi->i_len = htons(oilen);
+	ctx->ctx_oi = NULL;
+
+	return (0);
+}
+
+int
+oflowmod_iclose(struct oflowmod_ctx *ctx)
+{
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+
+	if (oflowmod_state(ctx, OFMCTX_IOPEN, OFMCTX_ICLOSE) == -1)
+		return (oflowmod_err(ctx, __func__, __LINE__));
+
+	if (ctx->ctx_oi != NULL && oflowmod_instructionclose(ctx) == -1)
+		return (-1);
+
+	ctx->ctx_iend = ibuf->wpos;
+
+	return (0);
+}
+
+int
+oflowmod_close(struct oflowmod_ctx *ctx)
+{
+	struct ofp_flow_mod	*fm = ctx->ctx_fm;
+	struct ibuf		*ibuf = ctx->ctx_ibuf;
+	size_t			 len;
+
+	/* No matches, calculate default */
+	if (ctx->ctx_state < OFMCTX_MOPEN &&
+	    (oflowmod_mopen(ctx) == -1 ||
+	    oflowmod_mclose(ctx) == -1))
+		goto err;
+
+	/* No instructions, calculate default */
+	if (ctx->ctx_state < OFMCTX_IOPEN &&
+	    (oflowmod_iopen(ctx) == -1 ||
+	    oflowmod_iclose(ctx) == -1))
+		goto err;
+
+	if (oflowmod_state(ctx, OFMCTX_ICLOSE, OFMCTX_CLOSE) == -1)
+		goto err;
+
+	/* Update length */
+	len = ibuf->wpos - ctx->ctx_start;
+	fm->fm_oh.oh_length = htons(len);
+
+	return (0);
+
+ err:
+	return (oflowmod_err(ctx, __func__, __LINE__));
+
 }

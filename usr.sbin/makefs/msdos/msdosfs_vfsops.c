@@ -1,4 +1,4 @@
-/*	$OpenBSD: msdosfs_vfsops.c,v 1.5 2016/10/17 01:16:22 tedu Exp $	*/
+/*	$OpenBSD: msdosfs_vfsops.c,v 1.11 2016/12/17 16:43:30 krw Exp $	*/
 
 /*-
  * Copyright (C) 1994, 1995, 1997 Wolfgang Solfrank.
@@ -50,14 +50,14 @@
 #include <sys/param.h>
 #include <sys/time.h>
 
-#include <ffs/buf.h>
+#include "ffs/buf.h"
 
-#include <fs/msdosfs/bpb.h>
-#include <fs/msdosfs/bootsect.h>
-#include <fs/msdosfs/direntry.h>
-#include <fs/msdosfs/denode.h>
-#include <fs/msdosfs/msdosfsmount.h>
-#include <fs/msdosfs/fat.h>
+#include <msdosfs/bpb.h>
+#include <msdosfs/bootsect.h>
+#include "msdos/direntry.h"
+#include "msdos/denode.h"
+#include "msdos/msdosfsmount.h"
+#include "msdos/fat.h"
 
 #include <stdio.h>
 #include <errno.h>
@@ -67,7 +67,7 @@
 
 #include "makefs.h"
 #include "msdos.h"
-#include "mkfs_msdos.h"
+#include "msdos/mkfs_msdos.h"
 
 #ifdef MSDOSFS_DEBUG
 #define DPRINTF(a) printf a
@@ -85,11 +85,9 @@ msdosfs_mount(struct mkfsvnode *devvp, int flags)
 	struct byte_bpb50 *b50;
 	struct byte_bpb710 *b710;
 	uint8_t SecPerClust;
-	int	ronly = 0, error, tmp;
+	int	ronly = 0, error;
 	int	bsize;
-	struct msdos_options *m = devvp->fs->fs_specific;
 	struct timezone tz;
-	uint64_t psize = m->create_size;
 	unsigned secsize = 512;
 
 	DPRINTF(("%s(bread 0)\n", __func__));
@@ -103,7 +101,7 @@ msdosfs_mount(struct mkfsvnode *devvp, int flags)
 
 	if (bsp->bs50.bsBootSectSig0 != BOOTSIG0
 	    || bsp->bs50.bsBootSectSig1 != BOOTSIG1) {
-		DPRINTF(("bootsig0 %d bootsig1 %d\n", 
+		DPRINTF(("bootsig0 %d bootsig1 %d\n",
 		    bsp->bs50.bsBootSectSig0,
 		    bsp->bs50.bsBootSectSig1));
 		error = EINVAL;
@@ -140,10 +138,10 @@ msdosfs_mount(struct mkfsvnode *devvp, int flags)
 	    pmp->pm_RootDirEnts, pmp->pm_Sectors, pmp->pm_FATsecs,
 	    pmp->pm_SecPerTrack, pmp->pm_Heads, pmp->pm_Media));
 	/* XXX - We should probably check more values here */
-    	if (!pmp->pm_BytesPerSec || !SecPerClust
-    		|| pmp->pm_SecPerTrack > 63) {
+	if (!pmp->pm_BytesPerSec || !SecPerClust
+		|| pmp->pm_SecPerTrack > 63) {
 		DPRINTF(("bytespersec %d secperclust %d "
-		    "secpertrack %d\n", 
+		    "secpertrack %d\n",
 		    pmp->pm_BytesPerSec, SecPerClust,
 		    pmp->pm_SecPerTrack));
 		error = EINVAL;
@@ -259,7 +257,7 @@ msdosfs_mount(struct mkfsvnode *devvp, int flags)
 	 * must be a power of 2
 	 */
 	if (pmp->pm_bpcluster ^ (1 << pmp->pm_cnshift)) {
-		DPRINTF(("bpcluster %lu cnshift %lu\n", 
+		DPRINTF(("bpcluster %lu cnshift %lu\n",
 		    pmp->pm_bpcluster, pmp->pm_cnshift));
 		error = EINVAL;
 		goto error_exit;
@@ -336,14 +334,6 @@ msdosfs_mount(struct mkfsvnode *devvp, int flags)
 		pmp->pm_flags |= MSDOSFSMNT_RONLY;
 	else
 		pmp->pm_fmod = 1;
-
-	/*
-	 * If we ever do quotas for DOS filesystems this would be a place
-	 * to fill in the info in the msdosfsmount structure. You dolt,
-	 * quotas on dos filesystems make no sense because files have no
-	 * owners on dos filesystems. of course there is some empty space
-	 * in the directory entry where we could put uid's and gid's.
-	 */
 
 	return pmp;
 

@@ -1,4 +1,4 @@
-/*	$OpenBSD: rde_filter.c,v 1.78 2016/10/14 16:05:36 phessler Exp $ */
+/*	$OpenBSD: rde_filter.c,v 1.83 2017/08/12 16:47:50 phessler Exp $ */
 
 /*
  * Copyright (c) 2004 Claudio Jeker <claudio@openbsd.org>
@@ -26,6 +26,7 @@
 
 #include "bgpd.h"
 #include "rde.h"
+#include "log.h"
 
 int	rde_filter_match(struct filter_rule *, struct rde_aspath *,
 	    struct bgpd_addr *, u_int8_t, struct rde_peer *, struct rde_peer *);
@@ -105,7 +106,7 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			}
 			break;
 		case ACTION_SET_PREPEND_SELF:
-			prep_as = rde_local_as();
+			prep_as = peer->conf.local_as;
 			prepend = set->action.prepend;
 			np = aspath_prepend(asp->aspath, prep_as, prepend, &nl);
 			aspath_put(asp->aspath);
@@ -138,6 +139,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				as = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				as = peer->conf.local_as;
+				break;
 			default:
 				as = set->action.community.as;
 				break;
@@ -149,6 +153,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 				fatalx("rde_apply_set bad community string");
 			case COMMUNITY_NEIGHBOR_AS:
 				type = peer->conf.remote_as;
+				break;
+			case COMMUNITY_LOCAL_AS:
+				type = peer->conf.local_as;
 				break;
 			default:
 				type = set->action.community.type;
@@ -164,6 +171,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				as = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				as = peer->conf.local_as;
+				break;
 			case COMMUNITY_ANY:
 			default:
 				as = set->action.community.as;
@@ -175,6 +185,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 				fatalx("rde_apply_set bad community string");
 			case COMMUNITY_NEIGHBOR_AS:
 				type = peer->conf.remote_as;
+				break;
+			case COMMUNITY_LOCAL_AS:
+				type = peer->conf.local_as;
 				break;
 			case COMMUNITY_ANY:
 			default:
@@ -191,6 +204,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				las = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				las = peer->conf.local_as;
+				break;
 			case COMMUNITY_ANY:
 			default:
 				las = set->action.large_community.as;
@@ -203,6 +219,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				ld1 = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				ld1 = peer->conf.local_as;
+				break;
 			case COMMUNITY_ANY:
 			default:
 				ld1 = set->action.large_community.ld1;
@@ -214,6 +233,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 				fatalx("rde_apply_set bad large community string");
 			case COMMUNITY_NEIGHBOR_AS:
 				ld2 = peer->conf.remote_as;
+				break;
+			case COMMUNITY_LOCAL_AS:
+				ld2 = peer->conf.local_as;
 				break;
 			case COMMUNITY_ANY:
 			default:
@@ -230,6 +252,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				las = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				las = peer->conf.local_as;
+				break;
 			case COMMUNITY_ANY:
 			default:
 				las = set->action.large_community.as;
@@ -242,6 +267,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 			case COMMUNITY_NEIGHBOR_AS:
 				ld1 = peer->conf.remote_as;
 				break;
+			case COMMUNITY_LOCAL_AS:
+				ld1 = peer->conf.local_as;
+				break;
 			case COMMUNITY_ANY:
 			default:
 				ld1 = set->action.large_community.ld1;
@@ -253,6 +281,9 @@ rde_apply_set(struct rde_aspath *asp, struct filter_set_head *sh,
 				fatalx("rde_apply_set bad large community string");
 			case COMMUNITY_NEIGHBOR_AS:
 				ld2 = peer->conf.remote_as;
+				break;
+			case COMMUNITY_LOCAL_AS:
+				ld2 = peer->conf.local_as;
 				break;
 			case COMMUNITY_ANY:
 			default:
@@ -316,6 +347,11 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 			return (0);
 	}
 
+	if (asp != NULL && f->peer.ebgp && !peer->conf.ebgp)
+			return (0);
+	if (asp != NULL && f->peer.ibgp && peer->conf.ebgp)
+			return (0);
+
 	if (asp != NULL && f->match.aslen.type != ASLEN_NONE)
 		if (aspath_lenmatch(asp->aspath, f->match.aslen.type,
 		    f->match.aslen.aslen) == 0)
@@ -328,6 +364,9 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 		case COMMUNITY_NEIGHBOR_AS:
 			cas = peer->conf.remote_as;
 			break;
+		case COMMUNITY_LOCAL_AS:
+			cas = peer->conf.local_as;
+			break;
 		default:
 			cas = f->match.community.as;
 			break;
@@ -338,6 +377,9 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 			fatalx("rde_apply_set bad community string");
 		case COMMUNITY_NEIGHBOR_AS:
 			type = peer->conf.remote_as;
+			break;
+		case COMMUNITY_LOCAL_AS:
+			type = peer->conf.local_as;
 			break;
 		default:
 			type = f->match.community.type;
@@ -360,6 +402,9 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 		case COMMUNITY_NEIGHBOR_AS:
 			las = peer->conf.remote_as;
 			break;
+		case COMMUNITY_LOCAL_AS:
+			las = peer->conf.local_as;
+			break;
 		default:
 			las = f->match.large_community.as;
 			break;
@@ -371,6 +416,9 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 		case COMMUNITY_NEIGHBOR_AS:
 			ld1 = peer->conf.remote_as;
 			break;
+		case COMMUNITY_LOCAL_AS:
+			ld1 = peer->conf.local_as;
+			break;
 		default:
 			ld1 = f->match.large_community.ld1;
 			break;
@@ -381,6 +429,9 @@ rde_filter_match(struct filter_rule *f, struct rde_aspath *asp,
 			fatalx("rde_apply_set bad community string");
 		case COMMUNITY_NEIGHBOR_AS:
 			ld2 = peer->conf.remote_as;
+			break;
+		case COMMUNITY_LOCAL_AS:
+			ld2 = peer->conf.local_as;
 			break;
 		default:
 			ld2 = f->match.large_community.ld2;
@@ -497,6 +548,18 @@ rde_filter_equal(struct filter_head *a, struct filter_head *b,
 			continue;
 		}
 
+		if (peer != NULL && fa != NULL && fa->peer.ebgp != 0 &&
+		    fa->peer.ebgp != peer->conf.ebgp) {
+			fa = TAILQ_NEXT(fa, entry);
+			continue;
+		}
+
+		if (peer != NULL && fa != NULL && fa->peer.ibgp != 0 &&
+		    fa->peer.ibgp != !peer->conf.ebgp) {
+			fa = TAILQ_NEXT(fa, entry);
+			continue;
+		}
+
 		/* compare the two rules */
 		if ((fa == NULL && fb != NULL) || (fa != NULL && fb == NULL))
 			/* new rule added or removed */
@@ -585,6 +648,21 @@ filterset_cmp(struct filter_set *a, struct filter_set *b)
 	    a->type == ACTION_DEL_EXT_COMMUNITY) {	/* a->type == b->type */
 		return (memcmp(&a->action.ext_community,
 		    &b->action.ext_community, sizeof(a->action.ext_community)));
+	}
+
+	if (a->type == ACTION_SET_LARGE_COMMUNITY ||
+	    a->type == ACTION_DEL_LARGE_COMMUNITY) {	/* a->type == b->type */
+		/* compare community */
+		if (a->action.large_community.as -
+		    b->action.large_community.as != 0)
+			return (a->action.large_community.as -
+			    b->action.large_community.as);
+		if (a->action.large_community.ld1 -
+		    b->action.large_community.ld1 != 0)
+			return (a->action.large_community.ld1 -
+			    b->action.large_community.ld1);
+		return (a->action.large_community.ld2 -
+		    b->action.large_community.ld2);
 	}
 
 	if (a->type == ACTION_SET_NEXTHOP && b->type == ACTION_SET_NEXTHOP) {

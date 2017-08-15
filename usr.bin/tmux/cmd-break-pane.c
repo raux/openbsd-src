@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-break-pane.c,v 1.40 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-break-pane.c,v 1.45 2017/04/22 10:22:39 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -34,11 +34,12 @@ const struct cmd_entry cmd_break_pane_entry = {
 	.name = "break-pane",
 	.alias = "breakp",
 
-	.args = { "dPF:s:t:", 0, 0 },
-	.usage = "[-dP] [-F format] [-s src-pane] [-t dst-window]",
+	.args = { "dPF:n:s:t:", 0, 0 },
+	.usage = "[-dP] [-F format] [-n window-name] [-s src-pane] "
+		 "[-t dst-window]",
 
-	.sflag = CMD_PANE,
-	.tflag = CMD_WINDOW_INDEX,
+	.source = { 's', CMD_FIND_PANE, 0 },
+	.target = { 't', CMD_FIND_WINDOW, CMD_FIND_WINDOW_INDEX },
 
 	.flags = 0,
 	.exec = cmd_break_pane_exec
@@ -48,15 +49,15 @@ static enum cmd_retval
 cmd_break_pane_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args		*args = self->args;
-	struct winlink		*wl = item->state.sflag.wl;
-	struct session		*src_s = item->state.sflag.s;
-	struct session		*dst_s = item->state.tflag.s;
-	struct window_pane	*wp = item->state.sflag.wp;
+	struct cmd_find_state	*current = &item->shared->current;
+	struct client		*c = cmd_find_client(item, NULL, 1);
+	struct winlink		*wl = item->source.wl;
+	struct session		*src_s = item->source.s;
+	struct session		*dst_s = item->target.s;
+	struct window_pane	*wp = item->source.wp;
 	struct window		*w = wl->window;
-	char			*name;
-	char			*cause;
-	int			 idx = item->state.tflag.idx;
-	struct format_tree	*ft;
+	char			*name, *cause;
+	int			 idx = item->target.idx;
 	const char		*template;
 	char			*cp;
 
@@ -78,17 +79,26 @@ cmd_break_pane_exec(struct cmd *self, struct cmdq_item *item)
 	w = wp->window = window_create(dst_s->sx, dst_s->sy);
 	TAILQ_INSERT_HEAD(&w->panes, wp, entry);
 	w->active = wp;
-	name = default_window_name(w);
-	window_set_name(w, name);
-	free(name);
+
+	if (!args_has(args, 'n')) {
+		name = default_window_name(w);
+		window_set_name(w, name);
+		free(name);
+	} else {
+		window_set_name(w, args_get(args, 'n'));
+		options_set_number(w->options, "automatic-rename", 0);
+	}
+
 	layout_init(w, wp);
 	wp->flags |= PANE_CHANGED;
 
 	if (idx == -1)
 		idx = -1 - options_get_number(dst_s->options, "base-index");
 	wl = session_attach(dst_s, w, idx, &cause); /* can't fail */
-	if (!args_has(self->args, 'd'))
+	if (!args_has(self->args, 'd')) {
 		session_select(dst_s, wl->idx);
+		cmd_find_from_session(current, dst_s);
+	}
 
 	server_redraw_session(src_s);
 	if (src_s != dst_s)
@@ -100,15 +110,9 @@ cmd_break_pane_exec(struct cmd *self, struct cmdq_item *item)
 	if (args_has(args, 'P')) {
 		if ((template = args_get(args, 'F')) == NULL)
 			template = BREAK_PANE_TEMPLATE;
-
-		ft = format_create(item, 0);
-		format_defaults(ft, item->state.c, dst_s, wl, wp);
-
-		cp = format_expand(ft, template);
+		cp = format_single(item, template, c, dst_s, wl, wp);
 		cmdq_print(item, "%s", cp);
 		free(cp);
-
-		format_free(ft);
 	}
 	return (CMD_RETURN_NORMAL);
 }

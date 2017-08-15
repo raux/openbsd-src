@@ -1,4 +1,4 @@
-/*	$OpenBSD: machdep.c,v 1.593 2016/10/21 06:20:58 mlarkin Exp $	*/
+/*	$OpenBSD: machdep.c,v 1.604 2017/07/12 06:26:32 natano Exp $	*/
 /*	$NetBSD: machdep.c,v 1.214 1996/11/10 03:16:17 thorpej Exp $	*/
 
 /*-
@@ -92,10 +92,6 @@
 #include <sys/kcore.h>
 #include <sys/sensors.h>
 
-#ifdef KGDB
-#include <sys/kgdb.h>
-#endif
-
 #include <dev/cons.h>
 #include <stand/boot/bootarg.h>
 
@@ -168,6 +164,12 @@ extern struct proc *npxproc;
 #include <machine/hibernate_var.h>
 #endif /* HIBERNATE */
 
+#include "ukbd.h"
+#include "pckbc.h"
+#if NPCKBC > 0 && NUKBD > 0
+#include <dev/ic/pckbcvar.h>
+#endif
+
 #include "vmm.h"
 
 void	replacesmap(void);
@@ -234,7 +236,8 @@ void (*update_cpuspeed)(void) = NULL;
 void	via_update_sensor(void *args);
 #endif
 int kbd_reset;
-int lid_suspend = 1;
+int lid_action = 1;
+int forceukbd;
 
 /*
  * safepri is a safe priority for sleep to set for a spin-wait
@@ -279,28 +282,6 @@ void	(*cpuresetfn)(void);
 
 int	bus_mem_add_mapping(bus_addr_t, bus_size_t,
 	    int, bus_space_handle_t *);
-
-#ifdef KGDB
-#ifndef KGDB_DEVNAME
-#define KGDB_DEVNAME "com"
-#endif /* KGDB_DEVNAME */
-char kgdb_devname[] = KGDB_DEVNAME;
-#if NCOM > 0
-#ifndef KGDBADDR
-#define KGDBADDR 0x3f8
-#endif
-int comkgdbaddr = KGDBADDR;
-#ifndef KGDBRATE
-#define KGDBRATE TTYDEF_SPEED
-#endif
-int comkgdbrate = KGDBRATE;
-#ifndef KGDBMODE
-#define KGDBMODE ((TTYDEF_CFLAG & ~(CSIZE | CSTOPB | PARENB)) | CS8) /* 8N1 */
-#endif
-int comkgdbmode = KGDBMODE;
-#endif /* NCOM > 0 */
-void kgdb_port_init(void);
-#endif /* KGDB */
 
 #ifdef APERTURE
 int allowaperture = 0;
@@ -2026,15 +2007,32 @@ identifycpu(struct cpu_info *ci)
 		}
 	}
 
+	/*
+	 * Attempt to disable Silicon Debug and lock the configuration
+	 * if it's enabled and unlocked.
+	 */
+	if (!strcmp(cpu_vendor, "GenuineIntel") &&
+	    (cpu_ecxfeature & CPUIDECX_SDBG)) {
+		uint64_t msr;
+
+		msr = rdmsr(IA32_DEBUG_INTERFACE);
+		if ((msr & IA32_DEBUG_INTERFACE_ENABLE) &&
+		    (msr & IA32_DEBUG_INTERFACE_LOCK) == 0) {
+			msr &= IA32_DEBUG_INTERFACE_MASK;
+			msr |= IA32_DEBUG_INTERFACE_LOCK;
+			wrmsr(IA32_DEBUG_INTERFACE, msr);
+		} else if (msr & IA32_DEBUG_INTERFACE_ENABLE)
+			printf("%s: cannot disable silicon debug\n",
+			    cpu_device);
+	}
+
 	if (ci->ci_flags & CPUF_PRIMARY) {
 		if (cpu_ecxfeature & CPUIDECX_RDRAND)
 			has_rdrand = 1;
 		if (ci->ci_feature_sefflags_ebx & SEFF0EBX_RDSEED)
 			has_rdseed = 1;
-#ifndef SMALL_KERNEL
 		if (ci->ci_feature_sefflags_ebx & SEFF0EBX_SMAP)
 			replacesmap();
-#endif
 	}
 
 #ifndef SMALL_KERNEL
@@ -2636,7 +2634,7 @@ __dead void
 boot(int howto)
 {
 	if ((howto & RB_POWERDOWN) != 0)
-		lid_suspend = 0;
+		lid_action = 0;
 
 	if (cold) {
 		if ((howto & RB_USERREQ) == 0)
@@ -3377,15 +3375,8 @@ init386(paddr_t first_avail)
 	db_machine_init();
 	ddb_init();
 	if (boothowto & RB_KDB)
-		Debugger();
+		db_enter();
 #endif
-#ifdef KGDB
-	kgdb_port_init();
-	if (boothowto & RB_KDB) {
-		kgdb_debug_init = 1;
-		kgdb_connect(1);
-	}
-#endif /* KGDB */
 
 	softintr_init();
 }
@@ -3399,21 +3390,6 @@ consinit(void)
 {
 	/* Already done in init386(). */
 }
-
-#ifdef KGDB
-void
-kgdb_port_init(void)
-{
-
-#if NCOM > 0
-	if (!strcmp(kgdb_devname, "com")) {
-		bus_space_tag_t tag = I386_BUS_SPACE_IO;
-		com_kgdb_attach(tag, comkgdbaddr, comkgdbrate, COM_FREQ,
-		    comkgdbmode);
-	}
-#endif
-}
-#endif /* KGDB */
 
 void
 cpu_reset(void)
@@ -3444,14 +3420,12 @@ cpu_reset(void)
 	lidt(&region);
 	__asm volatile("divl %0,%1" : : "q" (0), "a" (0));
 
-#if 1
 	/*
 	 * Try to cause a triple fault and watchdog reset by unmapping the
 	 * entire address space.
 	 */
 	bzero((caddr_t)PTD, NBPG);
 	tlbflush();
-#endif
 
 	for (;;)
 		continue;
@@ -3511,6 +3485,7 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
     size_t newlen, struct proc *p)
 {
 	dev_t dev;
+	int val, error;
 
 	switch (name[0]) {
 	case CPU_CONSDEV:
@@ -3575,8 +3550,26 @@ cpu_sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp, void *newp,
 		return (sysctl_rdint(oldp, oldlenp, newp, i386_has_sse2));
 	case CPU_XCRYPT:
 		return (sysctl_rdint(oldp, oldlenp, newp, i386_has_xcrypt));
-	case CPU_LIDSUSPEND:
-		return (sysctl_int(oldp, oldlenp, newp, newlen, &lid_suspend));
+	case CPU_LIDACTION:
+		val = lid_action;
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &val);
+		if (!error) {
+			if (val < 0 || val > 2)
+				error = EINVAL;
+			else
+				lid_action = val;
+		}
+		return (error);
+#if NPCKBC > 0 && NUKBD > 0
+	case CPU_FORCEUKBD:
+		if (forceukbd)
+			return (sysctl_rdint(oldp, oldlenp, newp, forceukbd));
+
+		error = sysctl_int(oldp, oldlenp, newp, newlen, &forceukbd);
+		if (forceukbd)
+			pckbc_release_console();
+		return (error);
+#endif
 	default:
 		return (EOPNOTSUPP);
 	}
@@ -3892,6 +3885,16 @@ splassert_check(int wantipl, const char *func)
 }
 #endif
 
+int
+copyin32(const uint32_t *uaddr, uint32_t *kaddr)
+{
+	if ((vaddr_t)uaddr & 0x3)
+		return EFAULT;
+
+	/* copyin(9) is atomic */
+	return copyin(uaddr, kaddr, sizeof(uint32_t));
+}
+
 /*
  * True if the system has any non-level interrupts which are shared
  * on the same pin.
@@ -4003,6 +4006,8 @@ cpu_check_vmm_cap(struct cpu_info *ci)
 		else {
 			if (msr & IA32_FEATURE_CONTROL_VMX_EN)
 				ci->ci_vmm_flags |= CI_VMM_VMX;
+			else
+				ci->ci_vmm_flags |= CI_VMM_DIS;
 		}
 	}
 

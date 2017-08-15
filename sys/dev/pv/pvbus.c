@@ -1,4 +1,4 @@
-/*	$OpenBSD: pvbus.c,v 1.13 2016/09/21 16:00:01 reyk Exp $	*/
+/*	$OpenBSD: pvbus.c,v 1.17 2017/06/22 06:21:12 jmatthew Exp $	*/
 
 /*
  * Copyright (c) 2015 Reyk Floeter <reyk@openbsd.org>
@@ -36,9 +36,7 @@
 #include <machine/cpu.h>
 #include <machine/conf.h>
 #include <machine/bus.h>
-#ifdef __amd64__
 #include <machine/vmmvar.h>
-#endif
 
 #include <dev/rndvar.h>
 
@@ -92,9 +90,7 @@ struct pvbus_type {
 	{ "VMwareVMware",	"VMware" },
 	{ "XenVMMXenVMM",	"Xen",	pvbus_xen, pvbus_xen_print },
 	{ "bhyve bhyve ",	"bhyve" },
-#ifdef __amd64__
 	{ VMM_HV_SIGNATURE,	"OpenBSD" },
-#endif
 };
 
 struct bus_dma_tag pvbus_dma_tag = {
@@ -214,6 +210,19 @@ pvbus_identify(void)
 		has_hv_cpuid = 1;
 }
 
+void
+pvbus_init_cpu(void)
+{
+	int i;
+
+	for (i = 0; i < PVBUS_MAX; i++) {
+		if (pvbus_hv[i].hv_base == 0)
+			continue;
+		if (pvbus_hv[i].hv_init_cpu != NULL)
+			(pvbus_hv[i].hv_init_cpu)(&pvbus_hv[i]);
+	}
+}
+
 int
 pvbus_activate(struct device *self, int act)
 {
@@ -261,6 +270,26 @@ pvbus_print(void *aux, const char *pnp)
 	if (pnp)
 		printf("%s at %s", pva->pva_busname, pnp);
 	return (UNCONF);
+}
+
+void
+pvbus_shutdown(struct device *dev)
+{
+	suspend_randomness();
+
+	log(LOG_KERN | LOG_NOTICE, "Shutting down in response to request"
+	    " from %s host\n", dev->dv_xname);
+	prsignal(initprocess, SIGUSR2);
+}
+
+void
+pvbus_reboot(struct device *dev)
+{
+	suspend_randomness();
+
+	log(LOG_KERN | LOG_NOTICE, "Rebooting in response to request"
+	    " from %s host\n", dev->dv_xname);
+	prsignal(initprocess, SIGINT);
 }
 
 void
@@ -328,7 +357,7 @@ pvbus_minor(struct pvbus_softc *sc, dev_t dev)
 
 	for (hvid = 0, cnt = 0; hvid < PVBUS_MAX; hvid++) {
 		hv = &sc->pvbus_hv[hvid];
-		if (hv->hv_base == 0 || hv->hv_kvop == NULL)
+		if (hv->hv_base == 0)
 			continue;
 		if (minor(dev) == cnt++)
 			return (hvid);

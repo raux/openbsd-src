@@ -1,4 +1,4 @@
-/*	$OpenBSD: if_urndis.c,v 1.62 2016/09/16 11:13:37 mikeb Exp $ */
+/*	$OpenBSD: if_urndis.c,v 1.67 2017/07/19 16:31:56 mikeb Exp $ */
 
 /*
  * Copyright (c) 2010 Jonathan Armani <armani@openbsd.org>
@@ -89,6 +89,8 @@ u_int32_t urndis_ctrl_handle_init(struct urndis_softc *,
 u_int32_t urndis_ctrl_handle_query(struct urndis_softc *,
     const struct rndis_comp_hdr *, void **, size_t *);
 u_int32_t urndis_ctrl_handle_reset(struct urndis_softc *,
+    const struct rndis_comp_hdr *);
+u_int32_t urndis_ctrl_handle_status(struct urndis_softc *,
     const struct rndis_comp_hdr *);
 
 u_int32_t urndis_ctrl_init(struct urndis_softc *);
@@ -182,7 +184,7 @@ urndis_ctrl_recv(struct urndis_softc *sc)
 
 	if (err != USBD_NORMAL_COMPLETION && err != USBD_SHORT_XFER) {
 		printf("%s: %s\n", DEVNAME(sc), usbd_errstr(err));
-		free(buf, M_TEMP, 0);
+		free(buf, M_TEMP, RNDIS_RESPONSE_LEN);
 		return NULL;
 	}
 
@@ -197,7 +199,7 @@ urndis_ctrl_recv(struct urndis_softc *sc)
 		    DEVNAME(sc),
 		    letoh32(hdr->rm_len),
 		    RNDIS_RESPONSE_LEN);
-		free(buf, M_TEMP, 0);
+		free(buf, M_TEMP, RNDIS_RESPONSE_LEN);
 		return NULL;
 	}
 
@@ -235,13 +237,17 @@ urndis_ctrl_handle(struct urndis_softc *sc, struct rndis_comp_hdr *hdr,
 			rval = letoh32(hdr->rm_status);
 			break;
 
+		case REMOTE_NDIS_INDICATE_STATUS_MSG:
+			rval = urndis_ctrl_handle_status(sc, hdr);
+			break;
+
 		default:
 			printf("%s: ctrl message error: unknown event 0x%x\n",
 			    DEVNAME(sc), letoh32(hdr->rm_type));
 			rval = RNDIS_STATUS_FAILURE;
 	}
 
-	free(hdr, M_TEMP, 0);
+	free(hdr, M_TEMP, RNDIS_RESPONSE_LEN);
 
 	return rval;
 }
@@ -402,13 +408,45 @@ urndis_ctrl_handle_reset(struct urndis_softc *sc,
 }
 
 u_int32_t
+urndis_ctrl_handle_status(struct urndis_softc *sc,
+    const struct rndis_comp_hdr *hdr)
+{
+	const struct rndis_status_msg	*msg;
+	u_int32_t			 rval;
+
+	msg = (struct rndis_status_msg *)hdr;
+
+	rval = letoh32(msg->rm_status);
+
+	DPRINTF(("%s: urndis_ctrl_handle_status: len %u status 0x%x "
+	    "stbuflen %u\n",
+	    DEVNAME(sc),
+	    letoh32(msg->rm_len),
+	    rval,
+	    letoh32(msg->rm_stbuflen)));
+
+	switch (rval) {
+		case RNDIS_STATUS_MEDIA_CONNECT:
+		case RNDIS_STATUS_MEDIA_DISCONNECT:
+		case RNDIS_STATUS_OFFLOAD_CURRENT_CONFIG:
+			rval = RNDIS_STATUS_SUCCESS;
+			break;
+
+		default:
+			printf("%s: status 0x%x\n", DEVNAME(sc), rval);
+	}
+
+	return rval;
+}
+
+u_int32_t
 urndis_ctrl_init(struct urndis_softc *sc)
 {
 	struct rndis_init_req	*msg;
 	u_int32_t		 rval;
 	struct rndis_comp_hdr	*hdr;
 
-	msg = malloc(sizeof(*msg), M_TEMP, M_WAITOK);
+	msg = malloc(sizeof(*msg), M_TEMP, M_WAITOK | M_CANFAIL);
 	if (msg == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -432,7 +470,7 @@ urndis_ctrl_init(struct urndis_softc *sc)
 	    letoh32(msg->rm_max_xfersz)));
 
 	rval = urndis_ctrl_send(sc, msg, sizeof(*msg));
-	free(msg, M_TEMP, 0);
+	free(msg, M_TEMP, sizeof *msg);
 
 	if (rval != RNDIS_STATUS_SUCCESS) {
 		printf("%s: init failed\n", DEVNAME(sc));
@@ -454,7 +492,7 @@ urndis_ctrl_halt(struct urndis_softc *sc)
 	struct rndis_halt_req	*msg;
 	u_int32_t		 rval;
 
-	msg = malloc(sizeof(*msg), M_TEMP, M_WAITOK);
+	msg = malloc(sizeof(*msg), M_TEMP, M_WAITOK | M_CANFAIL);
 	if (msg == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -471,7 +509,7 @@ urndis_ctrl_halt(struct urndis_softc *sc)
 	    letoh32(msg->rm_rid)));
 
 	rval = urndis_ctrl_send(sc, msg, sizeof(*msg));
-	free(msg, M_TEMP, 0);
+	free(msg, M_TEMP, sizeof *msg);
 
 	if (rval != RNDIS_STATUS_SUCCESS)
 		printf("%s: halt failed\n", DEVNAME(sc));
@@ -488,7 +526,7 @@ urndis_ctrl_query(struct urndis_softc *sc, u_int32_t oid,
 	u_int32_t		 rval;
 	struct rndis_comp_hdr	*hdr;
 
-	msg = malloc(sizeof(*msg) + qlen, M_TEMP, M_WAITOK);
+	msg = malloc(sizeof(*msg) + qlen, M_TEMP, M_WAITOK | M_CANFAIL);
 	if (msg == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -518,7 +556,7 @@ urndis_ctrl_query(struct urndis_softc *sc, u_int32_t oid,
 	    letoh32(msg->rm_devicevchdl)));
 
 	rval = urndis_ctrl_send(sc, msg, sizeof(*msg));
-	free(msg, M_TEMP, 0);
+	free(msg, M_TEMP, sizeof *msg + qlen);
 
 	if (rval != RNDIS_STATUS_SUCCESS) {
 		printf("%s: query failed\n", DEVNAME(sc));
@@ -541,7 +579,7 @@ urndis_ctrl_set(struct urndis_softc *sc, u_int32_t oid, void *buf, size_t len)
 	u_int32_t		 rval;
 	struct rndis_comp_hdr	*hdr;
 
-	msg = malloc(sizeof(*msg) + len, M_TEMP, M_WAITOK);
+	msg = malloc(sizeof(*msg) + len, M_TEMP, M_WAITOK | M_CANFAIL);
 	if (msg == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -571,7 +609,7 @@ urndis_ctrl_set(struct urndis_softc *sc, u_int32_t oid, void *buf, size_t len)
 	    letoh32(msg->rm_devicevchdl)));
 
 	rval = urndis_ctrl_send(sc, msg, sizeof(*msg) + len);
-	free(msg, M_TEMP, 0);
+	free(msg, M_TEMP, sizeof *msg + len);
 
 	if (rval != RNDIS_STATUS_SUCCESS) {
 		printf("%s: set failed\n", DEVNAME(sc));
@@ -605,7 +643,7 @@ urndis_ctrl_set_param(struct urndis_softc *sc,
 	else
 		namelen = 0;
 	tlen = sizeof(*param) + len + namelen;
-	param = malloc(tlen, M_TEMP, M_WAITOK);
+	param = malloc(tlen, M_TEMP, M_WAITOK | M_CANFAIL);
 	if (param == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -635,7 +673,7 @@ urndis_ctrl_set_param(struct urndis_softc *sc,
 	    letoh32(param->rm_valuelen)));
 
 	rval = urndis_ctrl_set(sc, OID_GEN_RNDIS_CONFIG_PARAMETER, param, tlen);
-	free(param, M_TEMP, 0);
+	free(param, M_TEMP, tlen);
 	if (rval != RNDIS_STATUS_SUCCESS)
 		printf("%s: set param failed 0x%x\n", DEVNAME(sc), rval);
 
@@ -651,7 +689,7 @@ urndis_ctrl_reset(struct urndis_softc *sc)
 	u_int32_t			 rval;
 	struct rndis_comp_hdr		*hdr;
 
-	reset = malloc(sizeof(*reset), M_TEMP, M_WAITOK);
+	reset = malloc(sizeof(*reset), M_TEMP, M_WAITOK | M_CANFAIL);
 	if (reset == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -668,7 +706,7 @@ urndis_ctrl_reset(struct urndis_softc *sc)
 	    letoh32(reset->rm_rid)));
 
 	rval = urndis_ctrl_send(sc, reset, sizeof(*reset));
-	free(reset, M_TEMP, 0);
+	free(reset, M_TEMP, sizeof *reset);
 
 	if (rval != RNDIS_STATUS_SUCCESS) {
 		printf("%s: reset failed\n", DEVNAME(sc));
@@ -691,7 +729,7 @@ urndis_ctrl_keepalive(struct urndis_softc *sc)
 	u_int32_t			 rval;
 	struct rndis_comp_hdr		*hdr;
 
-	keep = malloc(sizeof(*keep), M_TEMP, M_WAITOK);
+	keep = malloc(sizeof(*keep), M_TEMP, M_WAITOK | M_CANFAIL);
 	if (keep == NULL) {
 		printf("%s: out of memory\n", DEVNAME(sc));
 		return RNDIS_STATUS_FAILURE;
@@ -708,7 +746,7 @@ urndis_ctrl_keepalive(struct urndis_softc *sc)
 	    letoh32(keep->rm_rid)));
 
 	rval = urndis_ctrl_send(sc, keep, sizeof(*keep));
-	free(keep, M_TEMP, 0);
+	free(keep, M_TEMP, sizeof *keep);
 
 	if (rval != RNDIS_STATUS_SUCCESS) {
 		printf("%s: keepalive failed\n", DEVNAME(sc));
@@ -1271,8 +1309,6 @@ urndis_txeof(struct usbd_xfer *xfer,
 
 	if (err)
 		ifp->if_oerrors++;
-	else
-		ifp->if_opackets++;
 
 	if (IFQ_IS_EMPTY(&ifp->if_snd) == 0)
 		urndis_start(ifp);
@@ -1433,10 +1469,10 @@ urndis_attach(struct device *parent, struct device *self, void *aux)
 	if (bufsz == ETHER_ADDR_LEN) {
 		memcpy(eaddr, buf, ETHER_ADDR_LEN);
 		printf(", address %s\n", ether_sprintf(eaddr));
-		free(buf, M_TEMP, 0);
+		free(buf, M_TEMP, bufsz);
 	} else {
 		printf(", invalid address\n");
-		free(buf, M_TEMP, 0);
+		free(buf, M_TEMP, bufsz);
 		splx(s);
 		return;
 	}

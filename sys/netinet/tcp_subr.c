@@ -1,4 +1,4 @@
-/*	$OpenBSD: tcp_subr.c,v 1.156 2016/09/24 14:51:37 naddy Exp $	*/
+/*	$OpenBSD: tcp_subr.c,v 1.165 2017/06/26 09:32:32 mpi Exp $	*/
 /*	$NetBSD: tcp_subr.c,v 1.22 1996/02/13 23:44:00 christos Exp $	*/
 
 /*
@@ -90,7 +90,6 @@
 #include <netinet/tcp_seq.h>
 #include <netinet/tcp_timer.h>
 #include <netinet/tcp_var.h>
-#include <netinet/tcpip.h>
 
 #ifdef INET6
 #include <netinet6/ip6protosw.h>
@@ -131,7 +130,7 @@ struct pool tcpqe_pool;
 struct pool sackhl_pool;
 #endif
 
-struct tcpstat tcpstat;		/* tcp statistics */
+struct cpumem *tcpcounters;		/* tcp statistics */
 tcp_seq  tcp_iss;
 
 /*
@@ -152,6 +151,7 @@ tcp_init(void)
 	pool_sethardlimit(&sackhl_pool, tcp_sackhole_limit, NULL, 0);
 #endif /* TCP_SACK */
 	in_pcbinit(&tcbtable, TCB_INITIAL_HASH_SIZE);
+	tcpcounters = counters_alloc(tcps_ncounters);
 
 #ifdef INET6
 	/*
@@ -305,7 +305,8 @@ tcp_respond(struct tcpcb *tp, caddr_t template, struct tcphdr *th0,
 	int af;		/* af on wire */
 
 	if (tp) {
-		win = sbspace(&tp->t_inpcb->inp_socket->so_rcv);
+		struct socket *so = tp->t_inpcb->inp_socket;
+		win = sbspace(so, &so->so_rcv);
 		/*
 		 * If this is called with an unconnected
 		 * socket/tp/pcb (tp->pf is 0), we lose.
@@ -494,9 +495,9 @@ tcp_drop(struct tcpcb *tp, int errno)
 	if (TCPS_HAVERCVDSYN(tp->t_state)) {
 		tp->t_state = TCPS_CLOSED;
 		(void) tcp_output(tp);
-		tcpstat.tcps_drops++;
+		tcpstat_inc(tcps_drops);
 	} else
-		tcpstat.tcps_conndrops++;
+		tcpstat_inc(tcps_conndrops);
 	if (errno == ETIMEDOUT && tp->t_softerror)
 		errno = tp->t_softerror;
 	so->so_error = errno;
@@ -534,8 +535,7 @@ tcp_close(struct tcpcb *tp)
 		p = q;
 	}
 #endif
-	if (tp->t_template)
-		(void) m_free(tp->t_template);
+	m_free(tp->t_template);
 
 	tp->t_flags |= TF_DEAD;
 	timeout_add(&tp->t_reap_to, 0);
@@ -550,12 +550,9 @@ void
 tcp_reaper(void *arg)
 {
 	struct tcpcb *tp = arg;
-	int s;
 
-	s = splsoftnet();
 	pool_put(&tcpcb_pool, tp);
-	splx(s);
-	tcpstat.tcps_closed++;
+	tcpstat_inc(tcps_closed);
 }
 
 int
@@ -638,6 +635,7 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
 		u_int32_t th_seq;
 	} *thp;
 
+	CTASSERT(sizeof(*thp) <= sizeof(th));
 	if (sa->sa_family != AF_INET6 ||
 	    sa->sa_len != sizeof(struct sockaddr_in6) ||
 	    IN6_IS_ADDR_UNSPECIFIED(&sa6->sin6_addr) ||
@@ -685,10 +683,6 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
 			return;
 
 		bzero(&th, sizeof(th));
-#ifdef DIAGNOSTIC
-		if (sizeof(*thp) > sizeof(th))
-			panic("assumption failed in tcp6_ctlinput");
-#endif
 		m_copydata(m, off, sizeof(*thp), (caddr_t)&th);
 
 		/*
@@ -697,8 +691,7 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
 		 * payload.
 		 */
 		inp = in6_pcbhashlookup(&tcbtable, &sa6->sin6_addr,
-		    th.th_dport, (struct in6_addr *)&sa6_src->sin6_addr,
-		    th.th_sport, rdomain);
+		    th.th_dport, &sa6_src->sin6_addr, th.th_sport, rdomain);
 		if (cmd == PRC_MSGSIZE) {
 			/*
 			 * Depending on the value of "valid" and routing table
@@ -729,7 +722,7 @@ tcp6_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *d)
 }
 #endif
 
-void *
+void
 tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 {
 	struct ip *ip = v;
@@ -743,20 +736,20 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 	int errno;
 
 	if (sa->sa_family != AF_INET)
-		return NULL;
+		return;
 	faddr = satosin(sa)->sin_addr;
 	if (faddr.s_addr == INADDR_ANY)
-		return NULL;
+		return;
 
 	if ((unsigned)cmd >= PRC_NCMDS)
-		return NULL;
+		return;
 	errno = inetctlerrmap[cmd];
 	if (cmd == PRC_QUENCH)
 		/* 
 		 * Don't honor ICMP Source Quench messages meant for
 		 * TCP connections.
 		 */
-		return NULL;
+		return;
 	else if (PRC_IS_REDIRECT(cmd))
 		notify = in_rtchange, ip = 0;
 	else if (cmd == PRC_MSGSIZE && ip_mtudisc && ip) {
@@ -783,7 +776,7 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 			 */
 			mtu = (u_int)ntohs(icp->icmp_nextmtu);
 			if (mtu >= tp->t_pmtud_mtu_sent)
-				return NULL;
+				return;
 			if (mtu >= tcp_hdrsz(tp) + tp->t_pmtud_mss_acked) {
 				/* 
 				 * Calculate new MTU, and create corresponding
@@ -801,18 +794,18 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 				 */
 				if (tp->t_flags & TF_PMTUD_PEND) {
 					if (SEQ_LT(tp->t_pmtud_th_seq, seq))
-						return NULL;
+						return;
 				} else
 					tp->t_flags |= TF_PMTUD_PEND;
 				tp->t_pmtud_th_seq = seq;
 				tp->t_pmtud_nextmtu = icp->icmp_nextmtu;
 				tp->t_pmtud_ip_len = icp->icmp_ip.ip_len;
 				tp->t_pmtud_ip_hl = icp->icmp_ip.ip_hl;
-				return NULL;
+				return;
 			}
 		} else {
 			/* ignore if we don't have a matching connection */
-			return NULL;
+			return;
 		}
 		notify = tcp_mtudisc, ip = 0;
 	} else if (cmd == PRC_MTUINC)
@@ -820,7 +813,7 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 	else if (cmd == PRC_HOSTDEAD)
 		ip = 0;
 	else if (errno == 0)
-		return NULL;
+		return;
 
 	if (ip) {
 		th = (struct tcphdr *)((caddr_t)ip + (ip->ip_hl << 2));
@@ -848,8 +841,6 @@ tcp_ctlinput(int cmd, struct sockaddr *sa, u_int rdomain, void *v)
 		}
 	} else
 		in_pcbnotifyall(&tcbtable, sa, rdomain, errno, notify);
-
-	return NULL;
 }
 
 
@@ -889,7 +880,7 @@ tcp_mtudisc(struct inpcb *inp, int errno)
 					return;
 			}
 			if (orig_maxseg != tp->t_maxseg ||
-			    (rt->rt_rmx.rmx_locks & RTV_MTU))
+			    (rt->rt_locks & RTV_MTU))
 				change = 1;
 		}
 		tcp_mss(tp, -1);

@@ -1,4 +1,4 @@
-/*	$OpenBSD: types.h,v 1.6 2016/10/06 20:27:44 reyk Exp $	*/
+/*	$OpenBSD: types.h,v 1.10 2016/11/18 16:49:35 reyk Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -16,8 +16,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _SWITCHD_TYPES_H
-#define _SWITCHD_TYPES_H
+#ifndef SWITCHD_TYPES_H
+#define SWITCHD_TYPES_H
 
 #ifndef SWITCHD_USER
 #define SWITCHD_USER	"_switchd"
@@ -43,18 +43,11 @@
 #define SWITCHD_CACHE_MAX	4096	/* Default MAC address cache limit */
 #define SWITCHD_CACHE_TIMEOUT	240	/* t/o in seconds for learned MACs */
 
-#define SWITCHD_OFCCONN_TIMEOUT	20	/* connect timeout for OpenFlow ch. */
-
+#define SWITCHD_CONNECT_TIMEOUT	5
 
 #ifndef ETHER_ADDR_LEN
 #define ETHER_ADDR_LEN		6
 #endif
-
-struct constmap {
-	unsigned int	 cm_type;
-	const char	*cm_name;
-	const char	*cm_descr;
-};
 
 enum imsg_type {
 	IMSG_NONE	= 0,
@@ -69,8 +62,8 @@ enum imsg_type {
 	IMSG_CTL_SWITCH,
 	IMSG_CTL_MAC,
 	IMSG_CTL_SHOW_SUM,
-	IMSG_CTL_DEVICE_CONNECT,
-	IMSG_CTL_DEVICE_DISCONNECT,
+	IMSG_CTL_CONNECT,
+	IMSG_CTL_DISCONNECT,
 	IMSG_TAPFD
 };
 
@@ -98,8 +91,19 @@ enum switch_conn_type {
 	SWITCH_CONN_TLS
 };
 
+enum oflowmod_state {
+	OFMCTX_INIT,
+	OFMCTX_OPEN,
+	OFMCTX_MOPEN,
+	OFMCTX_MCLOSE,
+	OFMCTX_IOPEN,
+	OFMCTX_ICLOSE,
+	OFMCTX_CLOSE,
+	OFMCTX_ERR
+};
+
 #ifndef nitems
 #define nitems(_a)   (sizeof((_a)) / sizeof((_a)[0]))
 #endif
 
-#endif /* _SWITCHD_TYPES_H */
+#endif /* SWITCHD_TYPES_H */

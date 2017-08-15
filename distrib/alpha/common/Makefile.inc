@@ -1,4 +1,4 @@
-#	$OpenBSD: Makefile.inc,v 1.28 2016/10/14 18:44:19 deraadt Exp $
+#	$OpenBSD: Makefile.inc,v 1.31 2017/08/12 19:41:16 jasper Exp $
 
 TOP=		${.CURDIR}/..
 
@@ -15,6 +15,7 @@ PID!=		echo $$$$
 REALIMAGE!=	echo /var/tmp/image.${PID}
 
 STRIP?=		strip
+STRIPOPTS?=	-R .SUNW_ctf
 GZIPCMD?=	gzip
 GZIPFLAGS?=	-9fn
 INSTALLBOOT?=	/usr/mdec/installboot -v
@@ -28,14 +29,13 @@ BOOTXX?=	/usr/mdec/bootxx
 
 .include "${TOP}/inst-common/Makefile.inc"
 
-all: ${CBIN} ${FLOPPY}
+all: ${FLOPPY}
 
-DISKTYPE=       rdroot
-NBLKS=          5744
+DISKTYPE=	rdroot
+MAKEFSARGS_RD=	-o disklabel=${DISKTYPE},minfree=0,density=8192
 
 # old format, minfree, opt, b/i  trks, sects, cpg
 NEWFSARGS=	-t ffs -m 0 -o space
-NEWFSARGS_RD=	-i 8192
 NEWFSARGS_FD=	-i 524288 -c ${FLOPPYBLKS}
 
 CLEANFILES+=	bsd bsd.rd bsd.gz ${FLOPPY}
@@ -65,7 +65,7 @@ ${FLOPPY}:	bsd.gz
 
 bsd.gz:	bsd.rd
 	objcopy -Sg -R .comment bsd.rd bsd.strip
-	${STRIP} bsd.strip
+	${STRIP} ${STRIPOPTS} bsd.strip
 	${GZIPCMD} -c ${GZIPFLAGS} bsd.strip > bsd.gz
 
 bsd.rd: bsd ${IMAGE} rdsetroot
@@ -74,32 +74,23 @@ bsd.rd: bsd ${IMAGE} rdsetroot
 
 bsd:
 	cd ${.CURDIR}/../../../sys/arch/alpha/compile/${RAMDISK} && \
-	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && env COPTS=-Os ${MAKE}'
+	    su ${BUILDUSER} -c '${MAKE} config && ${MAKE} clean && env COPTS=-Oz ${MAKE}'
 	cp -p ${.CURDIR}/../../../sys/arch/alpha/compile/${RAMDISK}/obj/bsd bsd
 
-${IMAGE}:	do_prep do_mount do_files do_umount
-	mv -f ${REALIMAGE} ${IMAGE}
+${IMAGE}: ${CBIN}
+	rm -rf $@.d
+	install -d -o root -g wheel $@.d
+	mtree -def ${MTREE} -p $@.d -u
+	TOPDIR=${TOP} CURDIR=${.CURDIR} OBJDIR=${.OBJDIR} REV=${REV} \
+	    TARGDIR=$@.d UTILS=${UTILS} RELEASEDIR=${RELEASEDIR} \
+	    sh ${UTILS}/runlist.sh ${LISTS}
+	rm $@.d/${CBIN}
+	makefs ${MAKEFSARGS_RD} $@ $@.d
 
 rdsetroot: ${TOP}/../common/elfrdsetroot.c
 	${HOSTCC} ${HOSTCFLAGS} -o rdsetroot \
 	    ${TOP}/../common/elfrdsetroot.c ${TOP}/../common/elf32.c \
 	    ${TOP}/../common/elf64.c
-
-do_prep:
-	dd if=/dev/zero of=${REALIMAGE} count=${NBLKS}
-	vnconfig -v -c ${VND} ${REALIMAGE}
-	disklabel -w ${VND} ${DISKTYPE}
-	
-do_mount:
-	newfs ${NEWFSARGS} ${NEWFSARGS_RD} -s ${NBLKS} ${VND_RDEV}
-	mount ${VND_DEV} ${MOUNT_POINT}
-
-do_umount:
-	@echo ""
-	@df -i ${MOUNT_POINT}
-	@echo ""
-	umount ${MOUNT_POINT}
-	vnconfig -u ${VND}
 
 unconfig:
 	-umount ${MOUNT_POINT}

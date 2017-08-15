@@ -1,4 +1,4 @@
-/*	$OpenBSD: ofp10.c,v 1.12 2016/10/05 15:42:28 reyk Exp $	*/
+/*	$OpenBSD: ofp10.c,v 1.19 2016/12/02 14:39:46 rzalamena Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -43,6 +43,11 @@
 
 int	 ofp10_packet_match(struct packet *, struct ofp10_match *, unsigned int);
 
+int	 ofp10_features_reply(struct switchd *, struct switch_connection *,
+	    struct ofp_header *, struct ibuf *);
+int	 ofp10_validate_features_reply(struct switchd *,
+	    struct sockaddr_storage *, struct sockaddr_storage *,
+	    struct ofp_header *, struct ibuf *);
 int	 ofp10_echo_request(struct switchd *, struct switch_connection *,
 	    struct ofp_header *, struct ibuf *);
 int	 ofp10_validate_error(struct switchd *,
@@ -60,13 +65,14 @@ int	 ofp10_validate_packet_out(struct switchd *,
 	    struct ofp_header *, struct ibuf *);
 
 struct ofp_callback ofp10_callbacks[] = {
-	{ OFP10_T_HELLO,		ofp10_hello, NULL },
+	{ OFP10_T_HELLO,		ofp10_hello, ofp_validate_hello },
 	{ OFP10_T_ERROR,		NULL, ofp10_validate_error },
 	{ OFP10_T_ECHO_REQUEST,		ofp10_echo_request, NULL },
 	{ OFP10_T_ECHO_REPLY,		NULL, NULL },
 	{ OFP10_T_EXPERIMENTER,		NULL, NULL },
 	{ OFP10_T_FEATURES_REQUEST,	NULL, NULL },
-	{ OFP10_T_FEATURES_REPLY,	NULL, NULL },
+	{ OFP10_T_FEATURES_REPLY,	ofp10_features_reply,
+					ofp10_validate_features_reply },
 	{ OFP10_T_GET_CONFIG_REQUEST,	NULL, NULL },
 	{ OFP10_T_GET_CONFIG_REPLY,	NULL, NULL },
 	{ OFP10_T_SET_CONFIG,		NULL, NULL },
@@ -83,40 +89,6 @@ struct ofp_callback ofp10_callbacks[] = {
 	{ OFP10_T_QUEUE_GET_CONFIG_REQUEST, NULL, NULL },
 	{ OFP10_T_QUEUE_GET_CONFIG_REPLY, NULL, NULL }
 };
-
-int
-ofp_validate_header(struct switchd *sc,
-    struct sockaddr_storage *src, struct sockaddr_storage *dst,
-    struct ofp_header *oh, uint8_t version)
-{
-	struct constmap	*tmap;
-
-	/* For debug, don't verify the header if the version is unset */
-	if (version != OFP_V_0 &&
-	    (oh->oh_version != version ||
-	    oh->oh_type >= OFP_T_TYPE_MAX))
-		return (-1);
-
-	switch (version) {
-	case OFP_V_1_0:
-	case OFP_V_1_1:
-		tmap = ofp10_t_map;
-		break;
-	case OFP_V_1_3:
-	default:
-		tmap = ofp_t_map;
-		break;
-	}
-
-	log_debug("%s > %s: version %s type %s length %u xid %u",
-	    print_host(src, NULL, 0),
-	    print_host(dst, NULL, 0),
-	    print_map(oh->oh_version, ofp_v_map),
-	    print_map(oh->oh_type, tmap),
-	    ntohs(oh->oh_length), ntohl(oh->oh_xid));
-
-	return (0);
-}
 
 int
 ofp10_validate(struct switchd *sc,
@@ -290,31 +262,65 @@ int
 ofp10_hello(struct switchd *sc, struct switch_connection *con,
     struct ofp_header *oh, struct ibuf *ibuf)
 {
-	if (oh->oh_version == OFP_V_1_0 &&
-	    switch_add(con) == NULL) {
+	if (switch_add(con) == NULL) {
 		log_debug("%s: failed to add switch", __func__);
 		return (-1);
 	}
 
-	/* Echo back the received Hello packet */
-	oh->oh_version = OFP_V_1_0;
-	oh->oh_length = htons(sizeof(*oh));
-	oh->oh_xid = htonl(con->con_xidnxt++);
-	if (ofp10_validate(sc, &con->con_local, &con->con_peer, oh, NULL) != 0)
+	if (ofp_recv_hello(sc, con, oh, ibuf) == -1)
 		return (-1);
-	ofp_output(con, oh, NULL);
 
-#if 0
-	(void)write(fd, &oh, sizeof(oh));
-	ofd_debug(sc, &sname, &con->con_ss, &oh, buf, len);
-	oh.oh_xid = htonl(1);
-	oh.oh_type = OFP10_T_FEATURES_REQUEST;
-	(void)write(fd, &oh, sizeof(oh));
-	ofd_debug(sc, &sname, &con->con_ss, &oh, buf, len);
-	oh.oh_xid = htonl(2);
-	oh.oh_type = OFP10_T_GET_CONFIG_REQUEST;
-	(void)write(fd, &oh, sizeof(oh));
-#endif
+	return (ofp_nextstate(sc, con, OFP_STATE_FEATURE_WAIT));
+}
+
+int
+ofp10_features_reply(struct switchd *sc, struct switch_connection *con,
+    struct ofp_header *oh, struct ibuf *ibuf)
+{
+	return (ofp_nextstate(sc, con, OFP_STATE_ESTABLISHED));
+}
+
+int
+ofp10_validate_features_reply(struct switchd *sc,
+    struct sockaddr_storage *src, struct sockaddr_storage *dst,
+    struct ofp_header *oh, struct ibuf *ibuf)
+{
+	struct ofp_switch_features	*swf;
+	struct ofp10_phy_port		*swp;
+	off_t				 poff;
+	int				 portslen;
+	char				*mac;
+
+	if ((swf = ibuf_seek(ibuf, 0, sizeof(*swf))) == NULL)
+		return (-1);
+
+	log_debug("\tdatapath_id %#016llx nbuffers %u ntables %d "
+	    "capabilities %#08x actions %#08x",
+	    be64toh(swf->swf_datapath_id), ntohl(swf->swf_nbuffers),
+	    swf->swf_ntables, ntohl(swf->swf_capabilities),
+	    ntohl(swf->swf_actions));
+
+	poff = sizeof(*swf);
+	portslen = ntohs(oh->oh_length) - sizeof(*swf);
+	if (portslen <= 0)
+		return (0);
+
+	while (portslen > 0) {
+		if ((swp = ibuf_seek(ibuf, poff, sizeof(*swp))) == NULL)
+			return (-1);
+
+		mac = ether_ntoa((void *)swp->swp_macaddr);
+		log_debug("no %s macaddr %s name %s config %#08x state %#08x "
+		    "cur %#08x advertised %#08x supported %#08x peer %#08x",
+		    print_map(ntohs(swp->swp_number), ofp10_port_map), mac,
+		    swp->swp_name, swp->swp_config, swp->swp_state,
+		    swp->swp_cur, swp->swp_advertised, swp->swp_supported,
+		    swp->swp_peer);
+
+		portslen -= sizeof(*swp);
+		poff += sizeof(*swp);
+	}
+
 	return (0);
 }
 
@@ -339,7 +345,8 @@ ofp10_packet_match(struct packet *pkt, struct ofp10_match *m, uint32_t flags)
 	bzero(m, sizeof(*m));
 	m->m_wildcards = htonl(~flags);
 
-	if ((flags & (OFP10_WILDCARD_DL_SRC|OFP10_WILDCARD_DL_DST)) && (eh == NULL))
+	if ((flags & (OFP10_WILDCARD_DL_SRC|OFP10_WILDCARD_DL_DST)) &&
+	    (eh == NULL))
 		return (-1);
 
 	if (flags & OFP10_WILDCARD_DL_SRC)
@@ -376,7 +383,9 @@ ofp10_packet_in(struct switchd *sc, struct switch_connection *con,
 
 	if (packet_input(sc, con->con_switch,
 	    srcport, &dstport, ibuf, len, &pkt) == -1 ||
-	    dstport > OFP10_PORT_MAX) {
+	    (dstport > OFP10_PORT_MAX &&
+	    dstport != OFP10_PORT_LOCAL &&
+	    dstport != OFP10_PORT_CONTROLLER)) {
 		/* fallback to flooding */
 		dstport = OFP10_PORT_FLOOD;
 	} else if (srcport == dstport) {
@@ -385,10 +394,9 @@ ofp10_packet_in(struct switchd *sc, struct switch_connection *con,
 		 * (don't use OFP10_PORT_INPUT here)
 		 */
 		dstport = OFP10_PORT_ANY;
-	}
-
-	if (dstport <= OFP10_PORT_MAX)
+	} else {
 		addflow = 1;
+	}
 
 	if ((obuf = ibuf_static()) == NULL)
 		goto done;
@@ -408,7 +416,7 @@ ofp10_packet_in(struct switchd *sc, struct switch_connection *con,
 		fm->fm_priority = 0;
 		fm->fm_buffer_id = pin->pin_buffer_id;
 		fm->fm_flags = htons(OFP_FLOWFLAG_SEND_FLOW_REMOVED);
-		if (pin->pin_buffer_id == (uint32_t)-1)
+		if (pin->pin_buffer_id == htonl(OFP_PKTOUT_NO_BUFFER))
 			addpacket = 1;
 	} else {
 		if ((pout = ibuf_advance(obuf, sizeof(*pout))) == NULL)
@@ -419,7 +427,7 @@ ofp10_packet_in(struct switchd *sc, struct switch_connection *con,
 		pout->pout_port = pin->pin_port;
 		pout->pout_actions_len = htons(sizeof(*ao));
 
-		if (pin->pin_buffer_id == (uint32_t)-1)
+		if (pin->pin_buffer_id == htonl(OFP_PKTOUT_NO_BUFFER))
 			addpacket = 1;
 	}
 
@@ -430,8 +438,8 @@ ofp10_packet_in(struct switchd *sc, struct switch_connection *con,
 	ao->ao_port = htons((uint16_t)dstport);
 	ao->ao_max_len = 0;
 
-	/* Add optional packet payload */
-	if (addpacket &&
+	/* Add optional packet payload to packet-out. */
+	if (addflow == 0 && addpacket &&
 	    imsg_add(obuf, pkt.pkt_buf, pkt.pkt_len) == -1)
 		goto done;
 

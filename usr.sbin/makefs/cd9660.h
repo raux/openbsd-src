@@ -1,4 +1,4 @@
-/*	$OpenBSD: cd9660.h,v 1.2 2016/10/16 20:26:56 natano Exp $	*/
+/*	$OpenBSD: cd9660.h,v 1.14 2017/04/09 09:58:53 natano Exp $	*/
 /*	$NetBSD: cd9660.h,v 1.21 2015/12/24 15:52:37 christos Exp $	*/
 
 /*
@@ -51,8 +51,8 @@
 #include <sys/endian.h>
 
 #include "makefs.h"
-#include "iso.h"
-#include "iso_rrip.h"
+#include "cd9660/iso.h"
+#include "cd9660/iso_rrip.h"
 #include "cd9660/cd9660_eltorito.h"
 
 #ifdef DEBUG
@@ -61,32 +61,7 @@
 #define	INODE_WARNX(__x)
 #endif /* DEBUG */
 
-#define CD9660MAXPATH 4096
-
-#define ISO_STRING_FILTER_NONE = 0x00
-#define ISO_STRING_FILTER_DCHARS = 0x01
-#define ISO_STRING_FILTER_ACHARS = 0x02
-
-/*
-Extended preferences type, in the spirit of what makefs gives us (only ints)
-*/
-typedef struct {
-	const char  *shortName;		/* Short option */
-	const char	*name;		/* option name */
-	char		*value;		/* where to stuff the value */
-	int		minLength;	/* minimum for value */
-	int		maxLength;	/* maximum for value */
-	const char	*desc;		/* option description */
-	int		filterFlags;
-} string_option_t;
-
 /******** STRUCTURES **********/
-
-/*Defaults*/
-#define ISO_DEFAULT_VOLUMEID "MAKEFS_CD9660_IMAGE"
-#define ISO_DEFAULT_APPID "MAKEFS"
-#define ISO_DEFAULT_PUBLISHER "MAKEFS"
-#define ISO_DEFAULT_PREPARER "MAKEFS"
 
 #define ISO_VOLUME_DESCRIPTOR_STANDARD_ID "CD001"
 #define ISO_VOLUME_DESCRIPTOR_BOOT 0
@@ -116,7 +91,7 @@ typedef struct {
 	howmany((__bytes), (__sector_size))
 
 #define CD9660_MEM_ALLOC_ERROR(_F)	\
-    err(EXIT_FAILURE, "%s, %s l. %d", _F, __FILE__, __LINE__)
+    err(1, "%s, %s l. %d", _F, __FILE__, __LINE__)
 
 #define CD9660_TYPE_FILE	0x01
 #define CD9660_TYPE_DIR		0x02
@@ -259,11 +234,6 @@ typedef struct _iso9660_disk {
 
 	int include_padding_areas;
 
-	int follow_sym_links;
-	int verbose_level;
-	int displayHelp;
-	int keep_bad_images;
-
 	/* SUSP options and variables */
 	int64_t susp_continuation_area_start_sector;
 	int64_t susp_continuation_area_size;
@@ -275,17 +245,10 @@ typedef struct _iso9660_disk {
 	int rock_ridge_move_count;
 	cd9660node *rr_moved_dir;
 
-	int archimedes_enabled;
-	int chrp_boot;
-
 	/* Spec breaking options */
-	u_char allow_deep_trees;
-	u_char allow_start_dot;
-	u_char allow_max_name; /* Allow 37 char filenames*/
-	u_char allow_illegal_chars; /* ~, !, # */
-	u_char allow_lowercase;
-	u_char allow_multidot;
-	u_char omit_trailing_period;
+	int allow_deep_trees;
+	int allow_multidot;
+	int omit_trailing_period;
 
 	/* BOOT INFORMATION HERE */
 	int has_generic_bootimage; /* Default to 0 */
@@ -294,7 +257,6 @@ typedef struct _iso9660_disk {
 	int is_bootable;/* Default to 0 */
 	int64_t boot_catalog_sector;
 	boot_volume_descriptor *boot_descriptor;
-	char * boot_image_directory;
 
 	TAILQ_HEAD(boot_image_list,cd9660_boot_image) boot_images;
 	int image_serialno;
@@ -312,8 +274,8 @@ void			cd9660_721(uint16_t, unsigned char *);
 void			cd9660_731(uint32_t, unsigned char *);
 void			cd9660_722(uint16_t, unsigned char *);
 void			cd9660_732(uint32_t, unsigned char *);
-void 			cd9660_bothendian_dword(uint32_t dw, unsigned char *);
-void 			cd9660_bothendian_word(uint16_t dw, unsigned char *);
+void			cd9660_bothendian_dword(uint32_t dw, unsigned char *);
+void			cd9660_bothendian_word(uint16_t dw, unsigned char *);
 void			cd9660_set_date(char *, time_t);
 void			cd9660_time_8426(unsigned char *, time_t);
 void			cd9660_time_915(unsigned char *, time_t);
@@ -333,7 +295,7 @@ int	cd9660_setup_boot_volume_descriptor(iso9660_disk *,
 int	cd9660_write_image(iso9660_disk *, const char *image);
 int	cd9660_copy_file(iso9660_disk *, FILE *, off_t, const char *);
 
-void	cd9660_compute_full_filename(cd9660node *, char *);
+char	*cd9660_compute_full_filename(cd9660node *);
 int	cd9660_compute_record_size(iso9660_disk *, cd9660node *);
 
 /* Debugging functions */

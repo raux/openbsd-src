@@ -1,4 +1,4 @@
-/* $OpenBSD: cmd-list-panes.c,v 1.30 2016/10/16 19:04:05 nicm Exp $ */
+/* $OpenBSD: cmd-list-panes.c,v 1.33 2017/05/01 12:20:55 nicm Exp $ */
 
 /*
  * Copyright (c) 2009 Nicholas Marriott <nicholas.marriott@gmail.com>
@@ -41,7 +41,7 @@ const struct cmd_entry cmd_list_panes_entry = {
 	.args = { "asF:t:", 0, 0 },
 	.usage = "[-as] [-F format] " CMD_TARGET_WINDOW_USAGE,
 
-	.tflag = CMD_WINDOW,
+	.target = { 't', CMD_FIND_WINDOW, 0 },
 
 	.flags = CMD_AFTERHOOK,
 	.exec = cmd_list_panes_exec
@@ -51,8 +51,8 @@ static enum cmd_retval
 cmd_list_panes_exec(struct cmd *self, struct cmdq_item *item)
 {
 	struct args	*args = self->args;
-	struct session	*s = item->state.tflag.s;
-	struct winlink	*wl = item->state.tflag.wl;
+	struct session	*s = item->target.s;
+	struct winlink	*wl = item->target.wl;
 
 	if (args_has(args, 'a'))
 		cmd_list_panes_server(self, item);
@@ -123,7 +123,7 @@ cmd_list_panes_window(struct cmd *self, struct session *s, struct winlink *wl,
 
 	n = 0;
 	TAILQ_FOREACH(wp, &wl->window->panes, entry) {
-		ft = format_create(item, 0);
+		ft = format_create(item->client, item, FORMAT_NONE, 0);
 		format_add(ft, "line", "%u", n);
 		format_defaults(ft, NULL, s, wl, wp);
 

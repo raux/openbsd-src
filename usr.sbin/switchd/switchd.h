@@ -1,4 +1,4 @@
-/*	$OpenBSD: switchd.h,v 1.15 2016/10/07 08:49:53 reyk Exp $	*/
+/*	$OpenBSD: switchd.h,v 1.28 2016/12/22 15:31:43 rzalamena Exp $	*/
 
 /*
  * Copyright (c) 2013-2016 Reyk Floeter <reyk@openbsd.org>
@@ -16,8 +16,8 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
-#ifndef _SWITCHD_H
-#define _SWITCHD_H
+#ifndef SWITCHD_H
+#define SWITCHD_H
 
 #include <sys/queue.h>
 #include <sys/tree.h>
@@ -31,6 +31,7 @@
 #include "ofp10.h"
 #include "types.h"
 #include "proc.h"
+#include "ofp_map.h"
 
 struct switchd;
 
@@ -67,6 +68,30 @@ struct switch_control {
 };
 RB_HEAD(switch_head, switch_control);
 
+struct switch_table {
+	TAILQ_ENTRY(switch_table)	 st_entry;
+
+	int				 st_table;
+	unsigned int			 st_entries;
+	unsigned int			 st_maxentries;
+
+	uint32_t			 st_actions;
+	uint32_t			 st_actionsmiss;
+
+	uint32_t			 st_instructions;
+	uint32_t			 st_instructionsmiss;
+
+	uint64_t			 st_setfield;
+	uint64_t			 st_setfieldmiss;
+	uint64_t			 st_match;
+	uint64_t			 st_wildcard;
+
+	/* Maximum of 256 tables (64 * 4). */
+	uint64_t			 st_nexttable[4];
+	uint64_t			 st_nexttablemiss[4];
+};
+TAILQ_HEAD(switch_table_list, switch_table);
+
 struct multipart_message {
 	SLIST_ENTRY(multipart_message)
 				 mm_entry;
@@ -75,6 +100,11 @@ struct multipart_message {
 	uint8_t			 mm_type;
 };
 SLIST_HEAD(multipart_list, multipart_message);
+
+struct switch_address {
+	enum switch_conn_type	 swa_type;
+	struct sockaddr_storage	 swa_addr;
+};
 
 struct switch_connection {
 	unsigned int		 con_id;
@@ -87,10 +117,11 @@ struct switch_connection {
 	struct sockaddr_storage	 con_local;
 	in_port_t		 con_port;
 	uint32_t		 con_xidnxt;
+	int			 con_version;
+	enum ofp_state		 con_state;
 
 	struct event		 con_ev;
 	struct ibuf		*con_rbuf;
-	struct ibuf		*con_ibuf;
 	struct msgbuf		 con_wbuf;
 
 	struct switch_control	*con_switch;
@@ -98,6 +129,8 @@ struct switch_connection {
 	struct switch_server	*con_srv;
 
 	struct multipart_list	 con_mmlist;
+	struct switch_table_list
+				 con_stlist;
 
 	TAILQ_ENTRY(switch_connection)
 				 con_entry;
@@ -113,18 +146,15 @@ struct switch_server {
 	struct switchd		*srv_sc;
 };
 
-struct switch_controller {
-	enum switch_conn_type	 swc_type;
-	struct sockaddr_storage	 swc_addr;
+struct switch_client {
+	struct switch_address	 swc_addr;
+	struct switch_address	 swc_target;
+	struct event		 swc_ev;
+	void			*swc_arg;
+	TAILQ_ENTRY(switch_client)
+				 swc_next;
 };
-
-struct switch_device {
-	char			 sdv_device[PATH_MAX];
-	struct switch_controller sdv_swc;
-	TAILQ_ENTRY(switch_device)
-				 sdv_next;
-};
-TAILQ_HEAD(switch_devices, switch_device);
+TAILQ_HEAD(switch_clients, switch_client);
 
 struct switchd {
 	struct privsep		 sc_ps;
@@ -136,7 +166,7 @@ struct switchd {
 	unsigned int		 sc_cache_timeout;
 	char			 sc_conffile[PATH_MAX];
 	uint8_t			 sc_opts;
-	struct switch_devices	 sc_devs;
+	struct switch_clients	 sc_clients;
 	struct switch_connections
 				 sc_conns;
 };
@@ -152,6 +182,22 @@ struct ofp_callback {
 
 #define SWITCHD_OPT_VERBOSE		0x01
 #define SWITCHD_OPT_NOACTION		0x04
+
+struct oflowmod_ctx {
+	uint8_t				 ctx_flags;
+#define OFMCTX_IBUF			 0x01
+	enum oflowmod_state		 ctx_state;
+
+	struct ibuf			*ctx_ibuf;
+	struct ofp_flow_mod		*ctx_fm;
+	size_t				 ctx_start;
+	size_t				 ctx_ostart;
+	size_t				 ctx_oend;
+	size_t				 ctx_istart;
+	size_t				 ctx_iend;
+	size_t				 ctx_oioff;
+	struct ofp_instruction		*ctx_oi;
+};
 
 /* switchd.c */
 int		 switchd_socket(struct sockaddr *, int);
@@ -195,6 +241,7 @@ void		 socket_set_blockmode(int, enum blockmodes);
 int		 accept4_reserve(int, struct sockaddr *, socklen_t *,
 		    int, int, volatile int *);
 in_port_t	 socket_getport(struct sockaddr_storage *);
+int		 socket_setport(struct sockaddr_storage *, in_port_t);
 int		 sockaddr_cmp(struct sockaddr *, struct sockaddr *, int);
 struct in6_addr *prefixlen2mask6(uint8_t, uint32_t *);
 uint32_t	 prefixlen2mask(uint8_t);
@@ -222,13 +269,17 @@ void		 ofrelay_write(struct switch_connection *, struct ibuf *);
 void		 ofp(struct privsep *, struct privsep_proc *);
 void		 ofp_close(struct switch_connection *);
 int		 ofp_open(struct privsep *, struct switch_connection *);
-int		 ofp_output(struct switch_connection *, struct ofp_header *,
-		    struct ibuf *);
 void		 ofp_accept(int, short, void *);
-int		 ofp_validate_header(struct switchd *,
-		    struct sockaddr_storage *, struct sockaddr_storage *,
-		    struct ofp_header *, uint8_t);
 int		 ofp_input(struct switch_connection *, struct ibuf *);
+int		 ofp_nextstate(struct switchd *, struct switch_connection *,
+		    enum ofp_state);
+struct switch_table *
+		 switch_tablelookup(struct switch_connection *, int);
+struct switch_table *
+		 switch_newtable(struct switch_connection *, int);
+void		 switch_deltable(struct switch_connection *,
+		    struct switch_table *);
+void		 switch_freetables(struct switch_connection *);
 
 /* ofp10.c */
 int		 ofp10_hello(struct switchd *, struct switch_connection *,
@@ -242,8 +293,37 @@ int		 ofp10_input(struct switchd *, struct switch_connection *,
 /* ofp13.c */
 int		 ofp13_input(struct switchd *, struct switch_connection *,
 		    struct ofp_header *, struct ibuf *);
+int		 ofp13_hello(struct switchd *, struct switch_connection *,
+		    struct ofp_header *oh, struct ibuf *);
+int		 ofp13_validate(struct switchd *,
+		    struct sockaddr_storage *, struct sockaddr_storage *,
+		    struct ofp_header *, struct ibuf *);
+int		 ofp13_desc(struct switchd *, struct switch_connection *);
+int		 ofp13_flow_stats(struct switchd *, struct switch_connection *,
+		    uint32_t, uint32_t, uint8_t);
+int		 ofp13_table_features(struct switchd *,
+		    struct switch_connection *, uint8_t);
+int		 ofp13_featuresrequest(struct switchd *,
+		    struct switch_connection *);
+struct ofp_flow_mod *
+		 ofp13_flowmod(struct switch_connection *, struct ibuf *,
+		    uint8_t, uint8_t, uint16_t, uint16_t, uint16_t);
+int		 ofp13_setconfig(struct switchd *, struct switch_connection *,
+		    uint16_t, uint16_t);
+int		 ofp13_tablemiss_sendctrl(struct switchd *,
+		    struct switch_connection *, uint8_t);
 
 /* ofp_common.c */
+int		 ofp_validate_header(struct switchd *,
+		    struct sockaddr_storage *, struct sockaddr_storage *,
+		    struct ofp_header *, uint8_t);
+int		 ofp_validate(struct switchd *,
+		    struct sockaddr_storage *, struct sockaddr_storage *,
+		    struct ofp_header *, struct ibuf *, uint8_t);
+int		 ofp_output(struct switch_connection *, struct ofp_header *,
+		    struct ibuf *);
+struct multipart_message *
+		    ofp_multipart_lookup(struct switch_connection *, uint32_t);
 int		 ofp_multipart_add(struct switch_connection *, uint32_t,
 		    uint8_t);
 void		 ofp_multipart_del(struct switch_connection *, uint32_t);
@@ -294,7 +374,31 @@ int		 oxm_mplstc(struct ibuf *, uint8_t);
 int		 oxm_mplsbos(struct ibuf *, uint8_t);
 int		 oxm_tunnelid(struct ibuf *, int, uint64_t, uint64_t);
 int		 oxm_ipv6exthdr(struct ibuf *, int, uint16_t, uint16_t);
+struct ofp_instruction *
+		 ofp_instruction(struct ibuf *, uint16_t, uint16_t);
+struct ibuf *
+		 oflowmod_open(struct oflowmod_ctx *,
+		    struct switch_connection *, struct ibuf *, uint8_t);
+int		 oflowmod_close(struct oflowmod_ctx *);
+int		 oflowmod_mopen(struct oflowmod_ctx *);
+int		 oflowmod_mclose(struct oflowmod_ctx *);
+int		 oflowmod_iopen(struct oflowmod_ctx *);
+int		 oflowmod_iclose(struct oflowmod_ctx *);
+int		 oflowmod_instruction(struct oflowmod_ctx *, unsigned int);
 
+int		 oflowmod_instructionclose(struct oflowmod_ctx *);
+int		 oflowmod_state(struct oflowmod_ctx *,
+		    unsigned int, unsigned int);
+int		 oflowmod_err(struct oflowmod_ctx *, const char *, int);
+int		 ofp_validate_hello(struct switchd *,
+		    struct sockaddr_storage *, struct sockaddr_storage *,
+		    struct ofp_header *, struct ibuf *);
+int		 ofp_recv_hello(struct switchd *, struct switch_connection *,
+		    struct ofp_header *, struct ibuf *);
+int		 ofp_send_hello(struct switchd *, struct switch_connection *,
+		    int);
+int		 ofp_send_featuresrequest(struct switchd *,
+		    struct switch_connection *);
 /* ofcconn.c */
 void		 ofcconn(struct privsep *, struct privsep_proc *);
 void		 ofcconn_shutdown(void);
@@ -323,4 +427,4 @@ void		 ibuf_reset(struct ibuf *);
 int		 cmdline_symset(char *);
 int		 parse_config(const char *, struct switchd *);
 
-#endif /* _SWITCHD_H */
+#endif /* SWITCHD_H */

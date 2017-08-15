@@ -1,7 +1,7 @@
 #! /usr/bin/perl
 
 # ex:ts=8 sw=4:
-# $OpenBSD: PkgAdd.pm,v 1.91 2016/10/03 13:58:09 espie Exp $
+# $OpenBSD: PkgAdd.pm,v 1.96 2017/03/25 18:58:59 espie Exp $
 #
 # Copyright (c) 2003-2014 Marc Espie <espie@openbsd.org>
 #
@@ -89,9 +89,16 @@ sub tie_files
 	if (defined $sha->{$self->{d}->key}) {
 		my $tied = $sha->{$self->{d}->key};
 		# don't tie if there's a problem with the file
-		return unless -f $tied->realname($state);
+		my $realname = $tied->realname($state);
+		return unless -f $realname;
 		# and do a sanity check that this file wasn't altered
 		return unless (stat _)[7] == $self->{size};
+		if ($state->defines('checksum')) {
+			my $d = $self->compute_digest($realname, $self->{d});
+			# XXX we don't have to display anything here
+			# because delete will take care of that
+			return unless $d->equals($self->{d});
+		}
 		$self->{tieto} = $tied;
 		$tied->{tied} = 1;
 		$state->say("Tieing #1 to #2", $self->stringize,
@@ -106,7 +113,7 @@ sub handle_options
 {
 	my $state = shift;
 	$state->SUPER::handle_options('ruUzl:A:P:',
-	    '[-acinqrsUuvxz] [-A arch] [-B pkg-destdir] [-D name[=value]]',
+	    '[-acinqrsUuVvxz] [-A arch] [-B pkg-destdir] [-D name[=value]]',
 	    '[-L localbase] [-l file] [-P type] pkg-name ...');
 
 	$state->{arch} = $state->opt('A');
@@ -855,7 +862,8 @@ sub newer_has_errors
 		if ($handle->has_error) {
 			$state->set_name_from_handle($handle);
 			$state->log("Can't install #1: #2",
-			    $handle->pkgname, $handle->error_message);
+			    $handle->pkgname, $handle->error_message)
+			    unless $handle->has_reported_error;
 			$state->{bad}++;
 			$set->cleanup($handle->has_error);
 			$state->tracker->cant($set);

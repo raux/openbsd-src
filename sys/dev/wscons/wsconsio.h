@@ -1,4 +1,4 @@
-/* $OpenBSD: wsconsio.h,v 1.77 2016/10/23 22:59:19 bru Exp $ */
+/* $OpenBSD: wsconsio.h,v 1.83 2017/06/15 11:48:49 fcambus Exp $ */
 /* $NetBSD: wsconsio.h,v 1.74 2005/04/28 07:15:44 martin Exp $ */
 
 /*
@@ -54,7 +54,7 @@
 
 #define	WSSCREEN_NAME_SIZE	16
 #define	WSEMUL_NAME_SIZE	16
-#define	WSFONT_NAME_SIZE	16
+#define	WSFONT_NAME_SIZE	32
 
 /*
  * Common event structure (used by keyboard and mouse)
@@ -280,42 +280,65 @@ struct wsmouse_calibcoords {
  * Keys of the configuration parameters in WSMOUSEIO_GETPARAMS/
  * WSMOUSEIO_SETPARAMS calls. Arbitrary subsets can be passed, provided
  * that all keys are valid and that the number of key/value pairs doesn't
- * exceed the enum size.
- *
- * WSMOUSECFG_DX_SCALE, WSMOUSECFG_DY_SCALE:
- *	Scale factors in [*.12] fixed-point format.
- * WSMOUSECFG_PRESSURE_LO, WSMOUSECFG_PRESSURE_HI:
- *	Pressure limits defining the end and the start of touches.
- * WSMOUSECFG_TRKMAXDIST:
- *	When tracking MT contacts, don't pair points with a distance that
- *	exceeds this limit.
- * WSMOUSECFG_SWAPXY:
- *	Swap the X- and Y-axis.
- * WSMOUSECFG_X_INV, WSMOUSECFG_Y_INV:
- *	Map an absolute coordinate C to (INV - C), negate relative coordinates.
- * WSMOUSECFG_DX_MAX, WSMOUSECFG_DY_MAX:
- *	Ignore deltas that are greater than these limits (for touchpads in
- *	WSMOUSE_COMPAT mode only).
+ * exceed WSMOUSECFG_MAX.
  */
-#define wsmousecfg_group(group)	\
-    WSMOUSECFG_##group##_MAX,	\
-    WSMOUSECFG_##group##_ADV = (WSMOUSECFG_##group##_MAX | 0xff)
-
 enum wsmousecfg {
-	WSMOUSECFG_DX_SCALE,
-	WSMOUSECFG_DY_SCALE,
-	WSMOUSECFG_PRESSURE_LO,
-	WSMOUSECFG_PRESSURE_HI,
-	WSMOUSECFG_TRKMAXDIST,
-	WSMOUSECFG_SWAPXY,
-	WSMOUSECFG_X_INV,
-	WSMOUSECFG_Y_INV,
-	WSMOUSECFG_DX_MAX,
-	WSMOUSECFG_DY_MAX,
+ 	/*
+ 	 * Coordinate handling.
+ 	 */
+	WSMOUSECFG_DX_SCALE = 0,/* Xscale factor in [*.12] fixed-point format */
+	WSMOUSECFG_DY_SCALE,	/* Yscale factor in [*.12] fixed-point format */
+	WSMOUSECFG_PRESSURE_LO,	/* pressure limits defining start of touch */
+	WSMOUSECFG_PRESSURE_HI,	/* pressure limits defining end of touch */
+	WSMOUSECFG_TRKMAXDIST,	/* max distance to pair points for MT contact */
+	WSMOUSECFG_SWAPXY,	/* swap X- and Y-axis */
+	WSMOUSECFG_X_INV,	/* map absolute coordinate X to (INV - X) */
+	WSMOUSECFG_Y_INV,	/* map absolute coordinate Y to (INV - Y) */
 
-	wsmousecfg_group(FLTR),
+	/*
+	 * Coordinate handling, applying only in WSMOUSE_COMPAT  mode.
+	 */
+	WSMOUSECFG_DX_MAX = 32,	/* ignore X deltas greater than this limit */
+	WSMOUSECFG_DY_MAX,	/* ignore Y deltas greater than this limit */
+	WSMOUSECFG_X_HYSTERESIS,/* retard value for X coordinates */
+	WSMOUSECFG_Y_HYSTERESIS,/* retard value for Y coordinates */
+	WSMOUSECFG_DECELERATION,/* threshold (distance) for deceleration */
+	WSMOUSECFG_STRONG_HYSTERESIS,	/* apply the filter continuously */
+	WSMOUSECFG_SMOOTHING,	/* smoothing factor (0-7) */
+
+	/*
+	 * Touchpad features
+	 */
+	WSMOUSECFG_SOFTBUTTONS = 64,	/* 2 soft-buttons at the bottom edge */
+	WSMOUSECFG_SOFTMBTN,		/* add a middle-button area */
+	WSMOUSECFG_TOPBUTTONS,		/* 3 soft-buttons at the top edge */
+	WSMOUSECFG_TWOFINGERSCROLL,	/* enable two-finger scrolling */
+	WSMOUSECFG_EDGESCROLL,		/* enable edge scrolling */
+	WSMOUSECFG_HORIZSCROLL,		/* enable horizontal edge scrolling */
+	WSMOUSECFG_SWAPSIDES,		/* invert soft-button/scroll areas */
+	WSMOUSECFG_DISABLE,		/* disable all output except for
+					   clicks in the top-button area */
+	WSMOUSECFG_TAPPING,		/* enable tapping */
+
+	/*
+	 * Touchpad options
+	 */
+	WSMOUSECFG_LEFT_EDGE = 128,	/* ratio: left edge / total width */
+	WSMOUSECFG_RIGHT_EDGE,		/* ratio: right edge / total width */
+	WSMOUSECFG_TOP_EDGE,		/* ratio: top edge / total height */
+	WSMOUSECFG_BOTTOM_EDGE,		/* ratio: bottom edge / total height */
+	WSMOUSECFG_CENTERWIDTH,		/* ratio: center width / total width */
+	WSMOUSECFG_HORIZSCROLLDIST,	/* distance mapped to a scroll event */
+	WSMOUSECFG_VERTSCROLLDIST,	/* distance mapped to a scroll event */
+	WSMOUSECFG_F2WIDTH,		/* width limit for single touches */
+	WSMOUSECFG_F2PRESSURE,		/* pressure limit for single touches */
+	WSMOUSECFG_TAP_MAXTIME,		/* max. duration of tap contacts (ms) */
+	WSMOUSECFG_TAP_CLICKTIME,	/* time between the end of a tap and
+					   the button-up-event (ms) */
+	WSMOUSECFG_TAP_LOCKTIME,	/* time between a tap-and-drag action
+					   and the button-up-event (ms) */
 };
-#undef wsmousecfg_group
+#define WSMOUSECFG_MAX	36	/* max size of param array per ioctl */
 
 struct wsmouse_param {
 	enum wsmousecfg key;
@@ -483,8 +506,6 @@ struct wsdisplay_font {
 	int encoding;
 #define WSDISPLAY_FONTENC_ISO 0
 #define WSDISPLAY_FONTENC_IBM 1
-#define WSDISPLAY_FONTENC_PCVT 2
-#define WSDISPLAY_FONTENC_ISO7 3 /* greek */
 	u_int fontwidth, fontheight, stride;
 #define WSDISPLAY_MAXFONTSZ	(512*1024)
 	int bitorder, byteorder;
