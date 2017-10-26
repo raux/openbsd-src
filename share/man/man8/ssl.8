@@ -31,7 +31,7 @@
 .Nd details for libssl and libcrypto
 .Sh DESCRIPTION
 This document describes some of the issues relating to the use of
-the OpenSSL libssl and libcrypto libraries.
+the LibreSSL libssl and libcrypto libraries.
 This document is intended as an overview of what the libraries do,
 and what uses them.
 .Pp
@@ -110,7 +110,7 @@ and
 .Pa /etc/ssl/private/server.key
 in place, you should be able to start
 .Xr httpd 8
-with SSL configured, enabling HTTPS transactions with your machine on port 443.
+with TLS configured, enabling HTTPS transactions with your machine on port 443.
 .Pp
 You will most likely want to generate a self-signed certificate in the
 manner above along with your certificate signing request to test your
@@ -167,6 +167,9 @@ You can also sign the key yourself, using the command:
 .Xr sshd 8 ,
 .Xr starttls 8
 .Sh HISTORY
+LibreSSL started as a fork of OpenSSL 1.x.x. It was severely improved and
+tedu'ed... XXX tell me more
+.Pp
 Prior to Sept 21, 2000,
 there were problems shipping fully functional implementations of these
 protocols, as such shipment would include shipping
@@ -218,9 +221,11 @@ However, this entire debacle is worth remembering when choosing
 software and vendors.
 .Pp
 Due to multiple flaws in the protocols, SSL version 2 was removed in
-.Ox 5.2
-and SSL version 3 was disabled in
-.Ox 5.7 .
+.Ox 5.2 ,
+SSL version 3 was disabled in
+.Ox 5.7
+and then removed in
+.Ox 5.9 .
 Users and programs should use TLS version 1.2 instead.
 .Pp
 This document first appeared in
