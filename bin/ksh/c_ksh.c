@@ -14,6 +14,28 @@
 #include "sh.h"
 
 int
+c_pledge(char **wp)
+{
+	wp += 1;
+	if (*wp != NULL)
+		if (pledge(*wp, NULL) == -1)
+			return 1;
+	return 0;
+}
+
+int
+c_pledgedir(char **wp)
+{
+	wp += 1;
+	if (*wp != NULL) {
+		shprintf("%s\n", *wp);
+		if (pledge(NULL, wp) == -1)
+			return 1;
+	}
+	return 0;
+}
+
+int
 c_cd(char **wp)
 {
 	int optc;
@@ -1392,6 +1414,8 @@ const struct builtin kshbuiltins [] = {
 	{"+jobs", c_jobs},
 	{"+kill", c_kill},
 	{"let", c_let},
+	{"+pledge", c_pledge},
+	{"+pledgedir", c_pledgedir},
 	{"print", c_print},
 	{"pwd", c_pwd},
 	{"*=readonly", c_typeset},

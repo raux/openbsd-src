@@ -17,6 +17,8 @@
 # ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
+pledge "stdio rpath wpath cpath proc exec"
+
 _special_svcs="accounting check_quotas ipsec library_aslr multicast pf
                spamd_black"
 readonly _special_svcs
